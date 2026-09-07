@@ -13,13 +13,14 @@ from lock_utils import ProcessLock
 from multitf.scanner import _scan_lock, _scan_lock_5m
 from multitf.state import MtfStateRecord, update_state_in_db, MtfSubstate
 from multitf.data import strip_closed_candles
+from trading_calendar import enforce_trading_day_candles
 import pandas as pd
 
 IST = ZoneInfo("Asia/Kolkata")
 
 
 class TestMultiTfConcurrency(unittest.TestCase):
-    """Verifies that MULTI_TF and MULTI_TF_5M have completely decoupled locks."""
+    """Verifies that MULTI_TF and MULTI_TF_5M have completely decoupled locks and proper concurrency safeguards."""
 
     def tearDown(self):
         # Ensure locks are always released after each test
@@ -36,7 +37,6 @@ class TestMultiTfConcurrency(unittest.TestCase):
 
     def test_scenario_a_multitf_running_allows_multitf_5m(self):
         """Test A: When MULTI_TF holds multi_tf_scanner lock, MULTI_TF_5M can acquire multi_tf_5m_monitor."""
-        # Acquire MULTI_TF lock
         acquired_15m = _scan_lock.acquire(blocking=False)
         self.assertTrue(acquired_15m, "Failed to acquire MULTI_TF lock")
         self.assertTrue(_scan_lock.locked())
@@ -52,7 +52,6 @@ class TestMultiTfConcurrency(unittest.TestCase):
 
     def test_scenario_b_multitf_5m_running_allows_multitf(self):
         """Test B: When MULTI_TF_5M holds multi_tf_5m_monitor lock, MULTI_TF can acquire multi_tf_scanner."""
-        # Acquire MULTI_TF_5M lock
         acquired_5m = _scan_lock_5m.acquire(blocking=False)
         self.assertTrue(acquired_5m, "Failed to acquire MULTI_TF_5M lock")
         self.assertTrue(_scan_lock_5m.locked())
@@ -67,23 +66,39 @@ class TestMultiTfConcurrency(unittest.TestCase):
         _scan_lock_5m.release()
 
     def test_scenario_c_two_multitf_processes_reject_duplicate(self):
-        """Test C: Two simultaneous MULTI_TF instances cannot run concurrently."""
+        """Test C: Two simultaneous MULTI_TF instances (different threads/processes) cannot run concurrently."""
         acquired_1 = _scan_lock.acquire(blocking=False)
         self.assertTrue(acquired_1)
 
-        acquired_2 = _scan_lock.acquire(blocking=False)
-        self.assertFalse(acquired_2, "Duplicate MULTI_TF instance was erroneously allowed to acquire lock!")
+        result_2 = [None]
+        def _attempt_second():
+            result_2[0] = _scan_lock.acquire(blocking=False)
+            if result_2[0]:
+                _scan_lock.release()
 
+        t = threading.Thread(target=_attempt_second)
+        t.start()
+        t.join(timeout=2.0)
+
+        self.assertFalse(result_2[0], "Duplicate MULTI_TF instance was erroneously allowed to acquire lock!")
         _scan_lock.release()
 
     def test_scenario_d_two_multitf_5m_processes_reject_duplicate(self):
-        """Test D: Two simultaneous MULTI_TF_5M instances cannot run concurrently."""
+        """Test D: Two simultaneous MULTI_TF_5M instances (different threads/processes) cannot run concurrently."""
         acquired_1 = _scan_lock_5m.acquire(blocking=False)
         self.assertTrue(acquired_1)
 
-        acquired_2 = _scan_lock_5m.acquire(blocking=False)
-        self.assertFalse(acquired_2, "Duplicate MULTI_TF_5M instance was erroneously allowed to acquire lock!")
+        result_2 = [None]
+        def _attempt_second():
+            result_2[0] = _scan_lock_5m.acquire(blocking=False)
+            if result_2[0]:
+                _scan_lock_5m.release()
 
+        t = threading.Thread(target=_attempt_second)
+        t.start()
+        t.join(timeout=2.0)
+
+        self.assertFalse(result_2[0], "Duplicate MULTI_TF_5M instance was erroneously allowed to acquire lock!")
         _scan_lock_5m.release()
 
     def test_scenario_e_optimistic_concurrency_control_prevents_race(self):
@@ -96,7 +111,7 @@ class TestMultiTfConcurrency(unittest.TestCase):
             version=1
         )
 
-        with patch("app.multitf.state.get_connection") as mock_get_conn:
+        with patch("multitf.state.get_connection") as mock_get_conn:
             mock_conn = MagicMock()
             mock_cur = MagicMock()
             mock_get_conn.return_value.__enter__.return_value = mock_conn
@@ -112,7 +127,7 @@ class TestMultiTfConcurrency(unittest.TestCase):
             mock_cur.rowcount = 0
             stale_record = MtfStateRecord(symbol="TESTSYM", box_id="BOX_001", version=1)
             success_stale = update_state_in_db(stale_record, {"box_high": 110.0})
-            self.assertFalse(success_stale, "Stale CAS update should have failed!")
+            self.assertFalse(success_stale, "Stale CAS update should have returned False!")
 
     def test_scenario_f_weekend_candles_banned_in_strip_closed_candles(self):
         """Test F: Weekend (Saturday/Sunday) candles are strictly stripped before screening."""
@@ -130,12 +145,16 @@ class TestMultiTfConcurrency(unittest.TestCase):
             "volume": [1000, 1000, 1000, 1000],
         }, index=dates)
 
+        # Enforce trading calendar filter
+        cleaned_df = enforce_trading_day_candles(df, "TESTSYM")
+
         now_monday = datetime(2026, 9, 7, 10, 30, tzinfo=IST)
-        stripped = strip_closed_candles(df, interval_minutes=15, ist_now=now_monday)
+        stripped = strip_closed_candles(cleaned_df, 15, now_monday)
 
         # Verify Saturday (2026-09-05) and Sunday (2026-09-06) are not in stripped index
         for idx in stripped.index:
             self.assertNotIn(idx.weekday(), [5, 6], f"Weekend candle on day {idx.weekday()} was not stripped!")
+        self.assertEqual(len(stripped), 2, "Expected exactly 2 valid trading-day bars (Friday and Monday)")
 
 
 if __name__ == "__main__":
