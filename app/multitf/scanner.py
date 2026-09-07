@@ -489,7 +489,10 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
                 df_c = all_15m.get(sym)
                 last_close = 0.0
                 if df_c is not None and not df_c.empty:
-                    last_close = float(df_c["close"].iloc[-1])
+                    # RULE 67 RATIONALE: Support both 'Close' and 'close' column naming across data providers/DataFrames
+                    c_col = 'Close' if 'Close' in df_c.columns else ('close' if 'close' in df_c.columns else None)
+                    if c_col:
+                        last_close = float(df_c[c_col].iloc[-1])
 
                 is_near_ceiling = False
                 if box_high > 0 and last_close > 0:
