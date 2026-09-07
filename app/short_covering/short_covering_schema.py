@@ -3,16 +3,71 @@ app/short_covering/short_covering_schema.py
 
 Pydantic schemas and dataclasses for the Short-Covering Early-Ignition Scanner.
 Covers:
+- ShortCoveringState: State machine progression (WATCH -> IGNITION_CANDIDATE -> CONFIRMED_IGNITION -> CONTINUATION -> EXHAUSTED)
+- ProviderCapability: Explicit matrix of data provider capabilities (Upstox, Fyers, NSE)
 - FNOContractInfo: Resolved near/next contract specs
 - EODShortPositionCandidate: Output of Layer 1 EOD Engine
 - Intraday5mTrigger: 5m candle + OI evaluation
 - ShortCoveringSignal: High-confidence early alert contract
-- IntradayReplayMetrics: Replay / Backtest result metrics
+- IntradayReplayMetrics: Replay / Backtest result metrics with move consumed & earlyness
+- StrategyComparativeBenchmark: Comparative benchmark metrics across baseline strategies
 """
 
 from datetime import datetime, date
 from typing import Dict, List, Optional, Any
+from enum import Enum
 from pydantic import BaseModel, Field
+
+
+class ShortCoveringState(str, Enum):
+    """Lifecycle state machine for short-covering detection."""
+    WATCH = "WATCH"
+    IGNITION_CANDIDATE = "IGNITION_CANDIDATE"
+    CONFIRMED_IGNITION = "CONFIRMED_IGNITION"
+    CONTINUATION = "CONTINUATION"
+    EXHAUSTED = "EXHAUSTED"
+
+
+class ProviderCapability(BaseModel):
+    """Capabilities supported by a market data provider."""
+    provider_name: str
+    supports_5m_price: bool = True
+    supports_5m_volume: bool = True
+    supports_5m_oi: bool = False
+    supports_historical_oi: bool = False
+    supports_eod_bhavcopy: bool = False
+    oi_resolution_notes: str = ""
+
+
+PROVIDER_CAPABILITY_MATRIX: Dict[str, ProviderCapability] = {
+    "UPSTOX": ProviderCapability(
+        provider_name="UPSTOX",
+        supports_5m_price=True,
+        supports_5m_volume=True,
+        supports_5m_oi=True,
+        supports_historical_oi=True,
+        supports_eod_bhavcopy=False,
+        oi_resolution_notes="Upstox V3 candle API supports 5m OHLCV and open_interest directly."
+    ),
+    "FYERS": ProviderCapability(
+        provider_name="FYERS",
+        supports_5m_price=True,
+        supports_5m_volume=True,
+        supports_5m_oi=False,  # Quotes API does not provide OI; requires dedicated futures endpoint if available
+        supports_historical_oi=False,
+        supports_eod_bhavcopy=False,
+        oi_resolution_notes="Fyers quotes API does not provide OI. 5m OI must be routed to Upstox/Bhavcopy."
+    ),
+    "NSE_EOD": ProviderCapability(
+        provider_name="NSE_EOD",
+        supports_5m_price=False,
+        supports_5m_volume=False,
+        supports_5m_oi=False,
+        supports_historical_oi=True,
+        supports_eod_bhavcopy=True,
+        oi_resolution_notes="Authoritative source for daily F&O Bhavcopy and cumulative settlement OI."
+    ),
+}
 
 
 class FNOContractInfo(BaseModel):
@@ -76,6 +131,7 @@ class ShortCoveringSignal(BaseModel):
     symbol: str
     timestamp: datetime
     ignition_price: float
+    session_open_price: float = 0.0
     vwap: float
     stop_loss: float
     initial_target: float
@@ -87,9 +143,9 @@ class ShortCoveringSignal(BaseModel):
     prior_short_score: float
     ignition_score: float = Field(..., ge=0.0, le=100.0)
     grade: str = Field(..., description="A+ / A / B / C")
-    timeframe_confirmations: Dict[str, bool] = Field(default_factory=dict)
+    state: ShortCoveringState = ShortCoveringState.CONFIRMED_IGNITION
+    timeframe_confirmations: Dict[str, Any] = Field(default_factory=dict)
     reasons: List[str] = Field(default_factory=list)
-    state: str = "IGNITION"  # IGNITION | CONFIRMED_CONTINUATION | EXHAUSTION
 
 
 class IntradayReplayMetrics(BaseModel):
@@ -97,6 +153,17 @@ class IntradayReplayMetrics(BaseModel):
     symbol: str
     alert_time: datetime
     alert_price: float
+    session_open: float
+    session_high: float
+    session_low: float
+    move_consumed_at_alert_pct: float = Field(
+        ...,
+        description="Percentage of the total session range already consumed when the alert fired: (Alert - Low) / (High - Low)"
+    )
+    move_captured_after_alert_pct: float = Field(
+        ...,
+        description="Percentage of the session upside captured after alert: (High - Alert) / Alert"
+    )
     fwd_return_15m_pct: float
     fwd_return_30m_pct: float
     fwd_return_60m_pct: float
@@ -106,3 +173,22 @@ class IntradayReplayMetrics(BaseModel):
     mae_session_pct: float = Field(..., description="Max Adverse Excursion during the session")
     is_false_covering: bool = Field(False, description="True if price breached stop / ignition low within 30m")
     next_day_continuation: bool = Field(False, description="True if next session close > alert price")
+
+
+class StrategyComparativeBenchmark(BaseModel):
+    """Comparative benchmarking results comparing proposed strategy vs baseline models."""
+    strategy_name: str
+    total_alerts: int
+    win_rate_eod_pct: float
+    false_covering_rate_pct: float
+    next_day_continuation_rate_pct: float
+    avg_fwd_return_15m_pct: float
+    avg_fwd_return_30m_pct: float
+    avg_fwd_return_60m_pct: float
+    avg_fwd_return_120m_pct: float
+    avg_eod_return_pct: float
+    avg_session_mfe_pct: float
+    avg_session_mae_pct: float
+    median_move_consumed_pct: float
+    median_move_captured_pct: float
+    profit_factor: float

@@ -2,14 +2,14 @@
 app/short_covering/short_covering_scanner.py
 
 Layer 2: Intraday 5-Minute Ignition Engine for Short-Covering Early Alerts.
-Objective:
-- Executes every 5 minutes during live market hours (09:15 - 15:30 IST).
-- Consumes candidate watchlist from Layer 1 EOD Engine (plus active F&O universe).
-- Detects the exact early ignition transition (Price Up + OI Down + Volume Surge + VWAP Reclaim).
-- Confirms with 15m/30m multi-timeframe structural context.
-- Applies Excess OI Contraction (Stock vs NIFTY/Sector) to prevent false market-wide noise.
-- Validates anti-fake filters (rollover vs covering, minimum liquidity, headroom).
-- Issues immediate alerts on first confirmed ignition, with stateful continuation tracking.
+Features:
+- Multi-State Lifecycle Progression:
+    WATCH -> IGNITION_CANDIDATE -> CONFIRMED_IGNITION -> CONTINUATION -> EXHAUSTED
+- 5m Price + OI + Volume = Primary Early-Ignition Trigger
+- Tiered Progressive Scoring for 15m/30m structural context (30m breakout is not a hard barrier)
+- Excess OI Contraction (Stock vs Index/Sector)
+- Anti-Fake validation (rollover filter, liquidity, overhead clearance)
+- Stateful alert emission on CONFIRMED_IGNITION with deduplication
 """
 
 import logging
@@ -24,6 +24,7 @@ from app.short_covering.short_covering_schema import (
     EODShortPositionCandidate,
     Intraday5mTrigger,
     ShortCoveringSignal,
+    ShortCoveringState,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,19 +35,19 @@ class ShortCoveringEarlyIgnitionScanner:
 
     def __init__(
         self,
-        min_volume_surge_ratio: float = 1.4,
-        min_5m_oi_contraction_pct: float = -0.35,
-        min_session_oi_contraction_pct: float = -0.80,
-        min_ignition_score: float = 70.0,
+        min_volume_surge_ratio: float = 1.30,
+        min_5m_oi_contraction_pct: float = -0.30,
+        min_session_oi_contraction_pct: float = -0.60,
+        min_ignition_score: float = 68.0,
     ):
         self.min_volume_surge_ratio = min_volume_surge_ratio
         self.min_5m_oi_contraction_pct = min_5m_oi_contraction_pct
         self.min_session_oi_contraction_pct = min_session_oi_contraction_pct
         self.min_ignition_score = min_ignition_score
 
-        # In-memory tracking of active alerts for the trading session to prevent alert spam
-        # Maps symbol -> ShortCoveringSignal
-        self._session_alerted_symbols: Dict[str, ShortCoveringSignal] = {}
+        # Stateful candidate tracker across 5m cycles:
+        # Maps symbol -> {'state': ShortCoveringState, 'first_candidate_time': datetime, 'signal': Optional[ShortCoveringSignal]}
+        self._tracked_states: Dict[str, Dict] = {}
         self._last_scan_date: Optional[date] = None
 
     def run_5m_scan_cycle(
@@ -56,32 +57,25 @@ class ShortCoveringEarlyIgnitionScanner:
     ) -> List[ShortCoveringSignal]:
         """
         Executes one 5-minute scanning cycle across the candidate universe.
-        Returns newly ignited ShortCoveringSignal alerts.
+        Returns newly triggered CONFIRMED_IGNITION ShortCoveringSignal alerts.
         """
         if current_time is None:
             current_time = datetime.now()
 
-        # Reset session cache on a new day
         today = current_time.date()
         if self._last_scan_date != today:
-            self._session_alerted_symbols.clear()
+            self._tracked_states.clear()
             self._last_scan_date = today
 
-        # Load candidates from Layer 1 EOD watchlist if not passed explicitly
         if candidate_watchlist is None:
             candidate_watchlist = self._load_eod_watchlist(today)
 
-        # Build candidate lookup dictionary
         candidate_map = {c.symbol: c for c in candidate_watchlist}
-
-        # If watchlist is empty, fallback to scanning top F&O stocks
         symbols_to_scan = list(candidate_map.keys()) if candidate_map else fno_universe_manager.get_fno_symbols()[:60]
 
         logger.info(f"⚡ [Layer 2 5m Scanner] Starting cycle at {current_time.strftime('%H:%M:%S')} across {len(symbols_to_scan)} symbols")
 
         new_alerts: List[ShortCoveringSignal] = []
-
-        # Reference NIFTY 5m OI contraction for excess score calculation
         nifty_oi_5m_delta = self._get_index_5m_oi_delta(current_time)
 
         for symbol in symbols_to_scan:
@@ -92,16 +86,9 @@ class ShortCoveringEarlyIgnitionScanner:
                     eod_candidate=candidate_map.get(symbol),
                     nifty_oi_5m_delta=nifty_oi_5m_delta
                 )
-                if signal is not None:
-                    # Check if already alerted in this session
-                    if symbol not in self._session_alerted_symbols:
-                        self._session_alerted_symbols[symbol] = signal
-                        new_alerts.append(signal)
-                        logger.info(f"🚨 [SHORT COVERING IGNITION] {symbol} | Price={signal.ignition_price:.2f} | OI Delta={signal.excess_oi_contraction:.2f}% | Score={signal.ignition_score:.1f} ({signal.grade})")
-                    else:
-                        # Update state to CONFIRMED_CONTINUATION
-                        existing = self._session_alerted_symbols[symbol]
-                        existing.state = "CONFIRMED_CONTINUATION"
+                if signal is not None and signal.state == ShortCoveringState.CONFIRMED_IGNITION:
+                    new_alerts.append(signal)
+                    logger.info(f"🚨 [SHORT COVERING ALERT] {symbol} | Price={signal.ignition_price:.2f} | OI Contraction={signal.excess_oi_contraction:.2f}% | Score={signal.ignition_score:.1f} ({signal.grade})")
             except Exception as e:
                 logger.debug(f"Error in 5m evaluation for {symbol}: {e}")
 
@@ -118,19 +105,19 @@ class ShortCoveringEarlyIgnitionScanner:
         nifty_oi_5m_delta: float = 0.0
     ) -> Optional[ShortCoveringSignal]:
         """
-        Evaluates 5m bar and multi-timeframe context for an individual symbol.
+        Evaluates 5m bar, state progression, and tiered structural context for an individual symbol.
         """
         df_5m = oi_data_service.get_intraday_5m_data(symbol, current_time.date())
         if df_5m is None or len(df_5m) < 4:
             return None
 
-        # Filter up to current timestamp
         past_bars = df_5m[df_5m["timestamp"] <= current_time]
         if len(past_bars) < 3:
-            past_bars = df_5m.head(3)  # Use initial bars if simulating / early session
+            past_bars = df_5m.head(3)
 
         cur_bar = past_bars.iloc[-1]
         prev_bar = past_bars.iloc[-2]
+        session_open_price = float(past_bars.iloc[0]["open"])
 
         cur_close = float(cur_bar["close"])
         cur_open = float(cur_bar["open"])
@@ -138,121 +125,155 @@ class ShortCoveringEarlyIgnitionScanner:
         cur_vol = int(cur_bar["volume"])
         cur_oi = int(cur_bar["oi"])
 
-        # 1. 5m Price & VWAP Reclaim Trigger
+        # 1. Primary 5m Ignition Check (Price Up + OI Down + Volume Expansion)
         is_green_candle = cur_close >= cur_open
-        is_above_vwap = cur_close >= cur_vwap
+        is_above_vwap = cur_close >= cur_vwap * 0.999
         price_change_5m_pct = ((cur_close - float(prev_bar["close"])) / float(prev_bar["close"])) * 100.0
 
-        if not (is_green_candle and is_above_vwap and price_change_5m_pct >= 0.15):
-            return None
-
-        # 2. 5m & Session Open Interest Contraction
         oi_change_5m_pct = float(cur_bar["oi_change_5m_pct"])
         oi_change_session_pct = float(cur_bar["oi_change_session_pct"])
-
-        # Excess OI Contraction (removes broad market unwinding bias)
         excess_oi_contraction = oi_change_5m_pct - nifty_oi_5m_delta
 
-        # Must have negative OI change (covering)
-        if oi_change_5m_pct > self.min_5m_oi_contraction_pct and excess_oi_contraction > -0.25:
-            return None
-
-        # 3. Volume Surge Ratio (vs 10-period 5m average)
         avg_vol_10 = past_bars["volume"].tail(10).mean()
         vol_surge_ratio = cur_vol / max(avg_vol_10, 1.0)
-        if vol_surge_ratio < 1.1:
-            return None
 
-        # 4. Anti-Fake Filters (Rollover Check)
+        # Basic ignition filter
+        has_primary_ignition = (
+            is_green_candle and
+            is_above_vwap and
+            price_change_5m_pct >= 0.10 and
+            (oi_change_5m_pct <= self.min_5m_oi_contraction_pct or excess_oi_contraction <= -0.25) and
+            vol_surge_ratio >= 1.15
+        )
+
+        # Anti-Fake Rollover Check
         if oi_data_service.is_rollover_in_progress(symbol, oi_change_5m_pct, 0.0, current_time.date()):
-            logger.debug(f"Rejecting {symbol}: Identified as contract rollover")
             return None
 
-        # 5. Multi-Timeframe Structural Confirmation
-        # 15m & 30m context from resampled 5m bars
+        # 2. State Machine Management
+        tracking = self._tracked_states.get(symbol, {"state": ShortCoveringState.WATCH, "count": 0})
+        current_state = tracking["state"]
+
+        if not has_primary_ignition:
+            if current_state == ShortCoveringState.IGNITION_CANDIDATE:
+                tracking["state"] = ShortCoveringState.WATCH
+                self._tracked_states[symbol] = tracking
+            return None
+
+        # Progress State
+        if current_state == ShortCoveringState.WATCH:
+            # Transition to IGNITION_CANDIDATE
+            tracking["state"] = ShortCoveringState.IGNITION_CANDIDATE
+            tracking["first_candidate_time"] = current_time
+            tracking["count"] = 1
+            self._tracked_states[symbol] = tracking
+            logger.debug(f"🔍 [{symbol}] State -> IGNITION_CANDIDATE at {current_time.strftime('%H:%M')}")
+            # If immediate surge is exceptionally strong (e.g. 5m volume > 2x and excess OI < -1.5%), allow single-candle ignition
+            if vol_surge_ratio < 2.2 and excess_oi_contraction > -1.2 and (eod_candidate and eod_candidate.buildup_quality_score < 80):
+                return None  # Wait for next 5m confirmation bar
+
+        elif current_state == ShortCoveringState.IGNITION_CANDIDATE:
+            # Second confirming bar -> CONFIRMED_IGNITION
+            tracking["state"] = ShortCoveringState.CONFIRMED_IGNITION
+            tracking["count"] = tracking.get("count", 1) + 1
+            self._tracked_states[symbol] = tracking
+
+        elif current_state == ShortCoveringState.CONFIRMED_IGNITION:
+            # Subsequent bar -> CONTINUATION
+            tracking["state"] = ShortCoveringState.CONTINUATION
+            self._tracked_states[symbol] = tracking
+            return None
+
+        elif current_state in (ShortCoveringState.CONTINUATION, ShortCoveringState.EXHAUSTED):
+            return None
+
+        # 3. Tiered Multi-Timeframe Structural Context (Progressive Scoring)
         tf_confirmations = self._check_multitf_context(past_bars)
 
-        # 6. Relative Strength vs NIFTY
-        rs_pct = price_change_5m_pct - 0.10  # Baseline positive excess return
-
-        # 7. Comprehensive Ignition Scoring (0 to 100 scale)
+        # 4. Comprehensive Scoring (0 to 100)
         score = 0.0
         reasons = []
 
-        # A. Prior Short Positioning from Layer 1 (25 pts)
+        # A. Prior Short Buildup Quality (25 pts)
         if eod_candidate:
-            prior_score = eod_candidate.buildup_quality_score * 0.25
-            score += prior_score
+            prior_pts = (eod_candidate.buildup_quality_score / 100.0) * 25.0
+            score += prior_pts
             reasons.append(f"Prior Short Score: {eod_candidate.buildup_quality_score:.0f}")
         else:
-            prior_score = 15.0
-            score += prior_score
+            score += 15.0
 
-        # B. OI Contraction Speed & Excess Unwind (25 pts)
-        if excess_oi_contraction <= -1.5:
+        # B. Excess OI Contraction Speed (25 pts)
+        if excess_oi_contraction <= -1.2:
             score += 25.0
-            reasons.append(f"Fast Excess OI Unwind ({excess_oi_contraction:.2f}%)")
-        elif excess_oi_contraction <= -0.8:
+            reasons.append(f"Strong Excess OI Unwind ({excess_oi_contraction:.2f}%)")
+        elif excess_oi_contraction <= -0.6:
             score += 18.0
             reasons.append(f"Moderate Excess OI Unwind ({excess_oi_contraction:.2f}%)")
         else:
-            score += 10.0
+            score += 12.0
 
         # C. Volume Surge & Conviction (20 pts)
         if vol_surge_ratio >= 2.0:
             score += 20.0
-            reasons.append(f"Strong 5m Volume Surge ({vol_surge_ratio:.1f}x)")
+            reasons.append(f"High 5m Volume Spike ({vol_surge_ratio:.1f}x)")
         elif vol_surge_ratio >= self.min_volume_surge_ratio:
-            score += 14.0
-            reasons.append(f"Volume Expansion ({vol_surge_ratio:.1f}x)")
+            score += 15.0
+            reasons.append(f"Volume Surge ({vol_surge_ratio:.1f}x)")
         else:
             score += 8.0
 
         # D. VWAP & Price Momentum (15 pts)
-        if cur_close >= cur_vwap * 1.003 and price_change_5m_pct >= 0.4:
+        if cur_close >= cur_vwap * 1.003 and price_change_5m_pct >= 0.35:
             score += 15.0
-            reasons.append("Clean VWAP acceleration breakout")
+            reasons.append("Clean VWAP acceleration")
         else:
             score += 10.0
 
-        # E. Multi-TF Structural Alignment (15 pts)
-        if tf_confirmations.get("30m_structure_break", False) and tf_confirmations.get("15m_vwap_hold", False):
+        # E. Progressive 30m / 15m Structural Context (15 pts)
+        # 30m breakout is positive boost, NOT hard filter
+        struct_30m = tf_confirmations.get("30m_structure", "BASE")
+        if struct_30m == "BREAKOUT":
             score += 15.0
-            reasons.append("30m & 15m MTF Confirmation")
-        elif tf_confirmations.get("15m_vwap_hold", False):
+            reasons.append("30m Structural Breakout (+15)")
+        elif struct_30m == "NEAR_BREAKOUT":
             score += 10.0
-            reasons.append("15m VWAP Confirmation")
+            reasons.append("Near 30m Breakout (+10)")
+        elif struct_30m == "RECLAIMING_STRUCTURE":
+            score += 6.0
+            reasons.append("Reclaiming 30m Structure (+6)")
+        else:
+            score += 2.0
 
         if score < self.min_ignition_score:
             return None
 
         # Determine Grade
-        if score >= 88.0:
+        if score >= 85.0:
             grade = "A+"
-        elif score >= 80.0:
+        elif score >= 76.0:
             grade = "A"
-        elif score >= 72.0:
+        elif score >= 68.0:
             grade = "B"
         else:
             grade = "C"
 
-        # Structure-based Stop Loss (below ignition candle low or VWAP)
         ignition_low = float(cur_bar["low"])
         stop_loss = min(ignition_low, cur_vwap * 0.996)
         risk_per_share = max(cur_close - stop_loss, cur_close * 0.005)
 
-        # Target: Overhead pivot or 2x Risk
         if eod_candidate and eod_candidate.overhead_resistance > cur_close:
             target = eod_candidate.overhead_resistance
         else:
             target = cur_close + (risk_per_share * 2.0)
 
         rr_ratio = (target - cur_close) / risk_per_share
+        rs_pct = price_change_5m_pct - 0.10
 
         signal = ShortCoveringSignal(
             symbol=symbol,
             timestamp=current_time,
             ignition_price=cur_close,
+            session_open_price=session_open_price,
             vwap=cur_vwap,
             stop_loss=stop_loss,
             initial_target=target,
@@ -261,38 +282,42 @@ class ShortCoveringEarlyIgnitionScanner:
             oi_contraction_session_pct=float(oi_change_session_pct),
             volume_surge_ratio=float(vol_surge_ratio),
             rs_vs_nifty_pct=float(rs_pct),
-            prior_short_score=float(prior_score),
+            prior_short_score=float(score * 0.25),
             ignition_score=min(100.0, float(score)),
             grade=grade,
+            state=ShortCoveringState.CONFIRMED_IGNITION,
             timeframe_confirmations=tf_confirmations,
-            reasons=reasons,
-            state="IGNITION"
+            reasons=reasons
         )
         return signal
 
-    def _check_multitf_context(self, past_5m_bars: pd.DataFrame) -> Dict[str, bool]:
-        """Calculates 15m and 30m context from 5m bars."""
-        confirmations = {"15m_vwap_hold": False, "30m_structure_break": False}
+    def _check_multitf_context(self, past_5m_bars: pd.DataFrame) -> Dict[str, Any]:
+        """Calculates progressive 15m and 30m context from 5m bars."""
+        result = {"15m_vwap_hold": True, "30m_structure": "RECLAIMING_STRUCTURE"}
         if len(past_5m_bars) < 6:
-            confirmations["15m_vwap_hold"] = True
-            confirmations["30m_structure_break"] = True
-            return confirmations
+            return result
 
-        # Resample last 3 bars (15m)
         last_3 = past_5m_bars.tail(3)
         if last_3["close"].iloc[-1] >= last_3["vwap"].iloc[-1]:
-            confirmations["15m_vwap_hold"] = True
+            result["15m_vwap_hold"] = True
 
-        # Resample last 6 bars (30m) - check if current close breaks recent 30m high
         last_6 = past_5m_bars.tail(6)
         prior_high_30m = last_6["high"].iloc[:-1].max()
-        if last_6["close"].iloc[-1] >= prior_high_30m * 0.999:
-            confirmations["30m_structure_break"] = True
+        cur_close = last_6["close"].iloc[-1]
 
-        return confirmations
+        if cur_close >= prior_high_30m:
+            result["30m_structure"] = "BREAKOUT"
+        elif cur_close >= prior_high_30m * 0.995:
+            result["30m_structure"] = "NEAR_BREAKOUT"
+        elif cur_close >= last_6["vwap"].iloc[-1]:
+            result["30m_structure"] = "RECLAIMING_STRUCTURE"
+        else:
+            result["30m_structure"] = "BELOW_RESISTANCE"
+
+        return result
 
     def _get_index_5m_oi_delta(self, current_time: datetime) -> float:
-        """Fetches NIFTY 5m futures OI change percentage to benchmark market-wide unwinding."""
+        """Fetches NIFTY 5m futures OI change percentage."""
         try:
             df_nifty = oi_data_service.get_intraday_5m_data("NIFTY", current_time.date())
             if df_nifty is not None and not df_nifty.empty:
@@ -363,7 +388,7 @@ class ShortCoveringEarlyIgnitionScanner:
                             ignition_score NUMERIC(5,2),
                             grade VARCHAR(10),
                             reasons JSONB,
-                            state VARCHAR(30) DEFAULT 'IGNITION',
+                            state VARCHAR(30) DEFAULT 'CONFIRMED_IGNITION',
                             created_at TIMESTAMPTZ DEFAULT NOW()
                         );
                         CREATE INDEX IF NOT EXISTS idx_sc_alerts_time ON short_covering_alerts(alert_time);
@@ -381,14 +406,13 @@ class ShortCoveringEarlyIgnitionScanner:
                             a.symbol, a.timestamp, a.ignition_price, a.vwap, a.stop_loss,
                             a.initial_target, a.risk_reward_ratio, a.excess_oi_contraction,
                             a.volume_surge_ratio, a.ignition_score, a.grade,
-                            json.dumps(a.reasons), a.state
+                            json.dumps(a.reasons), a.state.value if hasattr(a.state, "value") else str(a.state)
                         ))
                     if hasattr(conn, "commit"):
                         conn.commit()
             logger.info(f"💾 Persisted {len(alerts)} alerts to short_covering_alerts table")
         except Exception as e:
             logger.debug(f"Database save for short_covering_alerts skipped: {e}")
-
 
 
 # Global singleton instance

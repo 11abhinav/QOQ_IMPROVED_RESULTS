@@ -3,8 +3,9 @@ app/short_covering/oi_data_service.py
 
 Unified Open Interest (OI) & Price Data Service.
 Provides:
+- Explicit provider capability validation (Upstox vs Fyers vs NSE EOD)
 - EOD Bhavcopy daily OI, volume, and price history for F&O underlying equities
-- Intraday 5m futures OHLCV + OI data
+- Intraday 5m futures OHLCV + OI data with data staleness guards
 - Total combined futures OI aggregation (near + next month) to isolate rollover flows
 - Database caching and fallback generation
 """
@@ -17,6 +18,10 @@ import numpy as np
 
 from app.short_covering.fno_contract_resolver import fno_contract_resolver
 from app.short_covering.fno_universe import fno_universe_manager
+from app.short_covering.short_covering_schema import (
+    PROVIDER_CAPABILITY_MATRIX,
+    ProviderCapability,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +29,32 @@ logger = logging.getLogger(__name__)
 class OIDataService:
     """Service to fetch, aggregate, and normalize Open Interest and Futures price data."""
 
-    def __init__(self):
+    def __init__(self, preferred_provider: str = "UPSTOX"):
+        self.preferred_provider = preferred_provider.upper()
         self._daily_oi_cache: Dict[str, pd.DataFrame] = {}
         self._intraday_oi_cache: Dict[str, pd.DataFrame] = {}
+
+    def get_provider_capability(self, provider_name: Optional[str] = None) -> ProviderCapability:
+        """Returns the capability specification for the given provider."""
+        p_name = (provider_name or self.preferred_provider).upper()
+        return PROVIDER_CAPABILITY_MATRIX.get(
+            p_name,
+            ProviderCapability(provider_name=p_name, supports_5m_oi=False, oi_resolution_notes="Unknown provider")
+        )
+
+    def validate_provider_capabilities(self, required_feature: str = "supports_5m_oi") -> bool:
+        """
+        Validates that the active market data provider natively supports the required OI feature.
+        Prevents silently using mismatched or stale OI when a provider lacks intraday OI support.
+        """
+        cap = self.get_provider_capability()
+        supports = getattr(cap, required_feature, False)
+        if not supports:
+            logger.warning(
+                f"⚠️ [OI DATA SERVICE] Active provider '{cap.provider_name}' does not support '{required_feature}'! "
+                f"Notes: {cap.oi_resolution_notes}"
+            )
+        return supports
 
     def get_daily_oi_history(
         self,
@@ -47,7 +75,6 @@ class OIDataService:
         if cache_key in self._daily_oi_cache:
             return self._daily_oi_cache[cache_key]
 
-        # Try to query from database or construct from available historical price cache
         df = self._fetch_or_build_daily_oi(clean_sym, lookback_days, as_of)
         self._daily_oi_cache[cache_key] = df
         return df
@@ -125,9 +152,7 @@ class OIDataService:
         except Exception as e:
             logger.debug(f"DB bhavcopy query skipped/empty for {symbol}: {e}")
 
-
-        # Fallback / local synthesis for backtest & bootstrap:
-        # Generates structured daily series with consistent price & simulated OI
+        # Fallback / local synthesis for backtest & bootstrap
         dates = [as_of - timedelta(days=i) for i in range(lookback_days * 2) if (as_of - timedelta(days=i)).weekday() < 5][:lookback_days]
         dates = sorted(dates)
 
@@ -157,14 +182,6 @@ class OIDataService:
         """
         Builds 5-minute bars (75 bars per NSE session from 09:15 to 15:30).
         """
-        # Try database / market data session if available
-        try:
-            from app.database import get_db_cursor
-            # Query if 5m intraday table exists
-        except Exception:
-            pass
-
-        # Build standard 75 5m intraday timestamps
         timestamps = []
         cur_dt = datetime(target_date.year, target_date.month, target_date.day, 9, 15)
         for _ in range(75):
