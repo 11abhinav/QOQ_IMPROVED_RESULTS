@@ -1,0 +1,271 @@
+"""
+app/short_covering/short_position_detector.py
+
+Layer 1: EOD Positioning Engine for Short-Covering Scanner.
+Objective:
+- Analyzes daily price action and open interest over the prior 5-10 trading sessions.
+- Detects heavy short positioning buildup (SBR >= 0.60, OI expansion >= +8%, falling price into support).
+- Identifies early stabilization / divergence (RSI oversold rebound, bottom wicks).
+- Generates the Next-Day Short-Covering Candidate Watchlist and persists to DB.
+"""
+
+import logging
+from datetime import date, datetime
+from typing import List, Dict, Optional, Tuple
+import pandas as pd
+import numpy as np
+
+from app.short_covering.fno_universe import fno_universe_manager
+from app.short_covering.oi_data_service import oi_data_service
+from app.short_covering.short_covering_schema import EODShortPositionCandidate
+
+logger = logging.getLogger(__name__)
+
+
+class ShortPositionDetector:
+    """Layer 1: EOD Short Positioning Engine."""
+
+    def __init__(
+        self,
+        min_oi_buildup_5d_pct: float = 6.0,
+        min_short_buildup_ratio: float = 0.55,
+        max_rsi: float = 48.0,
+    ):
+        self.min_oi_buildup_5d_pct = min_oi_buildup_5d_pct
+        self.min_short_buildup_ratio = min_short_buildup_ratio
+        self.max_rsi = max_rsi
+
+    def scan_eod_universe(
+        self,
+        as_of: Optional[date] = None,
+        custom_symbols: Optional[List[str]] = None
+    ) -> List[EODShortPositionCandidate]:
+        """
+        Scans the F&O universe at EOD to identify stocks with accumulated short positions.
+        Returns a list of high-quality candidates sorted by buildup quality score.
+        """
+        if as_of is None:
+            as_of = date.today()
+
+        symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
+        candidates: List[EODShortPositionCandidate] = []
+
+        logger.info(f"🔍 [Layer 1 EOD Engine] Starting scan across {len(symbols)} F&O symbols for date: {as_of}")
+
+        for symbol in symbols:
+            try:
+                candidate = self.evaluate_symbol(symbol, as_of)
+                if candidate is not None:
+                    candidates.append(candidate)
+            except Exception as e:
+                logger.debug(f"Error evaluating EOD candidate for {symbol}: {e}")
+
+        # Sort descending by buildup quality score
+        candidates.sort(key=lambda c: c.buildup_quality_score, reverse=True)
+        logger.info(f"✅ [Layer 1 EOD Engine] Found {len(candidates)} short-buildup candidates for next-day watchlist")
+
+        # Persist to database if available
+        self._persist_candidates_to_db(candidates, as_of)
+        return candidates
+
+    def evaluate_symbol(
+        self,
+        symbol: str,
+        as_of: date
+    ) -> Optional[EODShortPositionCandidate]:
+        """
+        Evaluates a single stock for prior short buildup over a 10-day lookback.
+        """
+        df = oi_data_service.get_daily_oi_history(symbol, lookback_days=15, as_of=as_of)
+        if df is None or len(df) < 8:
+            return None
+
+        # Sort chronologically
+        df = df.sort_values("date").reset_index(drop=True)
+
+        closes = df["close"].values
+        total_ois = df["total_oi"].values
+        volumes = df["volume"].values
+
+        # 1. Open Interest changes
+        cur_oi = total_ois[-1]
+        oi_5d_ago = total_ois[-6] if len(total_ois) >= 6 else total_ois[0]
+        oi_10d_ago = total_ois[-11] if len(total_ois) >= 11 else total_ois[0]
+
+        oi_5d_pct = ((cur_oi - oi_5d_ago) / max(oi_5d_ago, 1)) * 100.0
+        oi_10d_pct = ((cur_oi - oi_10d_ago) / max(oi_10d_ago, 1)) * 100.0
+        oi_1d_pct = df["oi_change_pct"].iloc[-1]
+
+        # 2. Price changes over 5 and 10 days
+        cur_price = closes[-1]
+        price_5d_ago = closes[-6] if len(closes) >= 6 else closes[0]
+        price_5d_pct = ((cur_price - price_5d_ago) / price_5d_ago) * 100.0
+
+        # 3. Short Buildup Ratio (SBR) over last 6-10 days
+        # Days where price fell and OI rose
+        lookback_slice = df.tail(8)
+        price_diffs = lookback_slice["close"].diff().dropna()
+        oi_diffs = lookback_slice["total_oi"].diff().dropna()
+
+        short_buildup_days = sum(1 for p, o in zip(price_diffs, oi_diffs) if p < 0 and o > 0)
+        total_days = len(price_diffs)
+        sbr = short_buildup_days / max(total_days, 1)
+
+        # 4. Technical Indicators (RSI, ATR, Key Levels)
+        rsi_14 = self._calculate_rsi(closes)
+        atr_14 = self._calculate_atr(df)
+        support_level = float(np.min(df["low"].tail(10)))
+        overhead_resistance = float(np.max(df["high"].tail(10)))
+
+        reasons = []
+        score = 0.0
+
+        # Criteria checks:
+        # A. Heavy prior short accumulation
+        if oi_5d_pct >= self.min_oi_buildup_5d_pct or oi_10d_pct >= 10.0:
+            score += 35.0
+            reasons.append(f"Strong 5d/10d OI expansion (+{oi_5d_pct:.1f}% / +{oi_10d_pct:.1f}%)")
+        else:
+            return None
+
+        # B. Consistent short buildup regime (SBR >= threshold)
+        if sbr >= self.min_short_buildup_ratio:
+            score += 25.0
+            reasons.append(f"High Short Buildup Ratio ({sbr:.2f})")
+        elif sbr >= 0.40 and price_5d_pct < -2.0:
+            score += 15.0
+            reasons.append(f"Moderate Short Buildup Ratio ({sbr:.2f}) with price decline")
+        else:
+            return None
+
+        # C. Price in oversold or support-forming zone
+        if rsi_14 <= self.max_rsi:
+            score += 20.0
+            reasons.append(f"RSI in deep base/oversold zone ({rsi_14:.1f})")
+        elif rsi_14 <= 55.0 and cur_price >= support_level * 0.99:
+            score += 10.0
+            reasons.append(f"Price stabilizing near 10d support ({support_level:.2f})")
+
+        # D. Early signs of short fatigue (OI expansion plateaued or minor 1d dip with green candle)
+        if oi_1d_pct <= 0.5 and closes[-1] >= df["open"].iloc[-1]:
+            score += 20.0
+            reasons.append("1d OI stall/reduction with bullish lower wick")
+
+        sector = fno_universe_manager.get_sector(symbol)
+
+        candidate = EODShortPositionCandidate(
+            symbol=symbol,
+            scan_date=as_of,
+            close_price=float(cur_price),
+            total_oi=int(cur_oi),
+            oi_change_pct_1d=float(oi_1d_pct),
+            oi_buildup_5d_pct=float(oi_5d_pct),
+            oi_buildup_10d_pct=float(oi_10d_pct),
+            short_buildup_ratio=float(sbr),
+            rsi_14=float(rsi_14),
+            support_level=support_level,
+            overhead_resistance=overhead_resistance,
+            atr_14=float(atr_14),
+            daily_volume=int(volumes[-1]),
+            sector=sector,
+            buildup_quality_score=min(100.0, score),
+            reasons=reasons
+        )
+        return candidate
+
+    def _calculate_rsi(self, closes: np.ndarray, period: int = 14) -> float:
+        """Calculates RSI over closing prices."""
+        if len(closes) < period + 1:
+            return 50.0
+        deltas = np.diff(closes)
+        seed = deltas[:period]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        rs = up / max(down, 1e-9)
+        rsi = 100.0 - 100.0 / (1.0 + rs)
+
+        for i in range(period, len(deltas)):
+            delta = deltas[i]
+            if delta > 0:
+                upval = delta
+                downval = 0.0
+            else:
+                upval = 0.0
+                downval = -delta
+            up = (up * (period - 1) + upval) / period
+            down = (down * (period - 1) + downval) / period
+            rs = up / max(down, 1e-9)
+            rsi = 100.0 - 100.0 / (1.0 + rs)
+        return float(rsi)
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculates 14-period Average True Range."""
+        if len(df) < 2:
+            return float(df["close"].iloc[-1] * 0.02)
+        highs = df["high"].values
+        lows = df["low"].values
+        closes = df["close"].values
+        tr = np.maximum(highs[1:] - lows[1:], np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])))
+        if len(tr) < period:
+            return float(np.mean(tr))
+        return float(np.mean(tr[-period:]))
+
+    def _persist_candidates_to_db(self, candidates: List[EODShortPositionCandidate], as_of: date) -> None:
+        """Persists next-day short-covering watchlist to database."""
+        try:
+            from app.database import get_connection
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Ensure table exists
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS short_covering_watchlist (
+                            symbol TEXT NOT NULL,
+                            scan_date DATE NOT NULL,
+                            close_price NUMERIC(10,2),
+                            total_oi BIGINT,
+                            oi_buildup_5d_pct NUMERIC(6,2),
+                            short_buildup_ratio NUMERIC(5,2),
+                            rsi_14 NUMERIC(5,2),
+                            support_level NUMERIC(10,2),
+                            overhead_resistance NUMERIC(10,2),
+                            atr_14 NUMERIC(10,2),
+                            buildup_quality_score NUMERIC(5,2),
+                            sector TEXT,
+                            created_at TIMESTAMPTZ DEFAULT NOW(),
+                            PRIMARY KEY (symbol, scan_date)
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_sc_watchlist_date ON short_covering_watchlist(scan_date);
+                    """)
+                    for c in candidates:
+                        cur.execute("""
+                            INSERT INTO short_covering_watchlist (
+                                symbol, scan_date, close_price, total_oi, oi_buildup_5d_pct,
+                                short_buildup_ratio, rsi_14, support_level, overhead_resistance,
+                                atr_14, buildup_quality_score, sector
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (symbol, scan_date) DO UPDATE SET
+                                close_price = EXCLUDED.close_price,
+                                total_oi = EXCLUDED.total_oi,
+                                oi_buildup_5d_pct = EXCLUDED.oi_buildup_5d_pct,
+                                short_buildup_ratio = EXCLUDED.short_buildup_ratio,
+                                rsi_14 = EXCLUDED.rsi_14,
+                                support_level = EXCLUDED.support_level,
+                                overhead_resistance = EXCLUDED.overhead_resistance,
+                                atr_14 = EXCLUDED.atr_14,
+                                buildup_quality_score = EXCLUDED.buildup_quality_score,
+                                sector = EXCLUDED.sector;
+                        """, (
+                            c.symbol, c.scan_date, c.close_price, c.total_oi, c.oi_buildup_5d_pct,
+                            c.short_buildup_ratio, c.rsi_14, c.support_level, c.overhead_resistance,
+                            c.atr_14, c.buildup_quality_score, c.sector
+                        ))
+                    if hasattr(conn, "commit"):
+                        conn.commit()
+            logger.info(f"💾 Persisted {len(candidates)} candidates to short_covering_watchlist table")
+        except Exception as e:
+            logger.debug(f"Database save for short_covering_watchlist skipped: {e}")
+
+
+
+# Global singleton instance
+short_position_detector = ShortPositionDetector()

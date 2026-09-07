@@ -2297,6 +2297,7 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
         "Earnings Calendar": None,  # removed
         "ACCUMULATION":  _trigger_accumulation,
         "TECHNICAL":     _trigger_technical,
+        "SHORT_COVERING": _trigger_short_covering,
     }
     
     fn = TRIGGER_MAP.get(scanner_key)
@@ -2319,7 +2320,9 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
         "Earnings Calendar": lambda: None,  # removed
         "ACCUMULATION":  lambda: __import__('accumulation_scanner')._accumulation_run_lock,
         "TECHNICAL":     lambda: __import__('technical_scanner')._scan_lock,
+        "SHORT_COVERING": lambda: None,
     }
+
     
     # Check in-memory thread lock first — if not locked, no scan is running in this process
     lock_fn = LOCK_MAP.get(scanner_key)
@@ -2543,6 +2546,24 @@ def _trigger_wealth_exit():
     from wealth_engine import run_wealth_intraday_update
     run_wealth_intraday_update()
     return {"total_count": 1, "processed_count": 1}
+
+def _trigger_short_covering(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
+    """Triggers Short-Covering scan (Layer 1 EOD or Layer 2 Intraday 5m cycle)."""
+    try:
+        from app.short_covering.short_covering_scanner import short_covering_scanner
+        from app.short_covering.short_position_detector import short_position_detector
+        # If EOD context, run Layer 1 positioning detector
+        if run_ctx == "EOD" or trigger_type == "EOD":
+            candidates = short_position_detector.scan_eod_universe()
+            return {"total_count": len(candidates), "processed_count": len(candidates), "type": "EOD_WATCHLIST"}
+        else:
+            # Intraday 5m ignition cycle
+            alerts = short_covering_scanner.run_5m_scan_cycle()
+            return {"total_count": len(alerts), "processed_count": len(alerts), "type": "INTRADAY_IGNITION"}
+    except Exception as e:
+        logger.error(f"❌ Error triggering short covering scan: {e}")
+        return {"total_count": 0, "processed_count": 0, "error": str(e)}
+
 
 
 # ENTRY POINT

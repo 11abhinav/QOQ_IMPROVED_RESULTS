@@ -123,7 +123,8 @@ class MasterOrchestratorV2:
             "REVERSAL_V2": "ACTIVE",
             "PULLBACK_V2": "ACTIVE",
             "ACCUMULATION_V2": "ACTIVE",
-            "MULTIBAGGER_V2": "ACTIVE"
+            "MULTIBAGGER_V2": "ACTIVE",
+            "SHORT_COVERING_V2": "ACTIVE"
         }
         global_status = "HEALTHY"
         try:
@@ -142,8 +143,11 @@ class MasterOrchestratorV2:
                     "ACCUMULATION": "ACCUMULATION_V2",
                     "ACCUMULATION_V2": "ACCUMULATION_V2",
                     "MULTIBAGGER": "MULTIBAGGER_V2",
-                    "MULTIBAGGER_V2": "MULTIBAGGER_V2"
+                    "MULTIBAGGER_V2": "MULTIBAGGER_V2",
+                    "SHORT_COVERING": "SHORT_COVERING_V2",
+                    "SHORT_COVERING_V2": "SHORT_COVERING_V2"
                 }
+
                 down_count = 0
                 for r in rows:
                     name = r.get("scanner_name")
@@ -1042,8 +1046,9 @@ class MasterOrchestratorV2:
         except Exception:
             live_symbols = 0
 
-        engines = ["EOD_V2", "MULTI_TF_V2", "REVERSAL_V2", "PULLBACK_V2", "ACCUMULATION_V2", "MULTIBAGGER_V2"]
+        engines = ["EOD_V2", "MULTI_TF_V2", "REVERSAL_V2", "PULLBACK_V2", "ACCUMULATION_V2", "MULTIBAGGER_V2", "SHORT_COVERING_V2"]
         return [
+
             {
                 "scanner": eng,
                 "status": "DOWN",

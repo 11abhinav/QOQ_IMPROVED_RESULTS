@@ -976,3 +976,13 @@ def get_regime_state() -> dict:
             return {"status": raw_regime.get("market_regime", "NORMAL"), **(raw_regime if isinstance(raw_regime, dict) else {})}
         except Exception:
             return {"status": "NORMAL"}
+
+# Short Covering Scanner Configuration
+try:
+    from app.short_covering_config import SHORT_COVERING_CONFIG
+except ImportError:
+    try:
+        from short_covering_config import SHORT_COVERING_CONFIG
+    except ImportError:
+        SHORT_COVERING_CONFIG = {}
+

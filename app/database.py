@@ -1882,6 +1882,51 @@ def init_db():
                 except Exception as _wl_idx_err:
                     logger.debug(f"Watchlist v2 index notice: {_wl_idx_err}")
 
+                # 43. Short Covering Watchlist & Alerts
+                try:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS short_covering_watchlist (
+                            symbol TEXT NOT NULL,
+                            scan_date DATE NOT NULL,
+                            close_price NUMERIC(10,2),
+                            total_oi BIGINT,
+                            oi_buildup_5d_pct NUMERIC(6,2),
+                            short_buildup_ratio NUMERIC(5,2),
+                            rsi_14 NUMERIC(5,2),
+                            support_level NUMERIC(10,2),
+                            overhead_resistance NUMERIC(10,2),
+                            atr_14 NUMERIC(10,2),
+                            buildup_quality_score NUMERIC(5,2),
+                            sector TEXT,
+                            created_at TIMESTAMPTZ DEFAULT NOW(),
+                            PRIMARY KEY (symbol, scan_date)
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_sc_watchlist_date ON short_covering_watchlist(scan_date);
+
+                        CREATE TABLE IF NOT EXISTS short_covering_alerts (
+                            id SERIAL PRIMARY KEY,
+                            symbol TEXT NOT NULL,
+                            alert_time TIMESTAMPTZ NOT NULL,
+                            ignition_price NUMERIC(10,2),
+                            vwap NUMERIC(10,2),
+                            stop_loss NUMERIC(10,2),
+                            initial_target NUMERIC(10,2),
+                            risk_reward_ratio NUMERIC(5,2),
+                            excess_oi_contraction NUMERIC(6,2),
+                            volume_surge_ratio NUMERIC(5,2),
+                            ignition_score NUMERIC(5,2),
+                            grade VARCHAR(10),
+                            reasons JSONB,
+                            state VARCHAR(30) DEFAULT 'IGNITION',
+                            created_at TIMESTAMPTZ DEFAULT NOW()
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_sc_alerts_time ON short_covering_alerts(alert_time);
+                        CREATE INDEX IF NOT EXISTS idx_sc_alerts_symbol ON short_covering_alerts(symbol);
+                    """)
+                except Exception as _sc_err:
+                    logger.debug(f"Short covering tables init notice: {_sc_err}")
+
+
                 # 39. Trade analytics view — wrapped in own try/except with lock_timeout
                 # to prevent this DDL from blocking on AccessExclusiveLock when other workers
                 # are reading from the 'alerts' table (causes deadlock otherwise).

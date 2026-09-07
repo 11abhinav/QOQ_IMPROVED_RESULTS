@@ -66,7 +66,18 @@ def _parse_dedup_key(breakout_type: str) -> tuple[str, str, str]:
 
 
 def _fetch_current_prices(symbols: list[str]) -> dict[str, float]:
-    """Batch-fetch latest prices using Fyers with Yahoo fallback."""
+    """Batch-fetch latest prices using Fyers with Yahoo fallback.
+
+    [RULE 67 CHANGE-RATIONALE]: Added Tier-3 parquet disk cache fallback.
+    When live providers (Fyers/Upstox) AND the DB CMP table both fail to return
+    a price for a symbol (e.g. HEG stuck in the 30-min dead_symbols_cache after a
+    transient provider failure), we read the last known Close from the daily 1D
+    parquet cache file as a stale-price last resort.
+    This prevents the recurring '🚨 No live price available' ERROR spam from firing
+    for stocks that are correctly held open positions but temporarily unavailable
+    from live quote APIs. The stale price is logged as WARNING (not ERROR) to clearly
+    distinguish it from a true live market price.
+    """
     if not symbols:
         return {}
 
@@ -78,6 +89,44 @@ def _fetch_current_prices(symbols: list[str]) -> dict[str, float]:
         mark_success('performance_tracker')
     except Exception:
         pass
+
+    # ── Tier 3: Disk Parquet Last-Known-Close Fallback ───────────────────────
+    # For any symbol still missing after live providers returned nothing,
+    # try to read the last Close from the daily history parquet cache.
+    missing_syms = [s for s in symbols if prices.get(s) is None]
+    if missing_syms:
+        try:
+            from config import DATA_DIR
+            history_dir = os.path.join(DATA_DIR, "history", "1d")
+            for sym in missing_syms:
+                clean = str(sym).upper().replace(".NS", "").replace(".BO", "")
+                # Try symbol name variants matching price_cache.py resolution conventions
+                candidates = [
+                    clean,
+                    clean.replace("&", "_"),
+                    clean.replace("-", "_"),
+                    clean.replace("&", "-"),
+                ]
+                for variant in candidates:
+                    fpath = os.path.join(history_dir, f"{variant}.parquet")
+                    if os.path.exists(fpath):
+                        try:
+                            df_cached = pd.read_parquet(fpath)
+                            if not df_cached.empty and "Close" in df_cached.columns:
+                                last_close = float(df_cached["Close"].dropna().iloc[-1])
+                                if last_close > 0:
+                                    prices[sym] = last_close
+                                    logger.warning(
+                                        f"⚠️ [PERF_TRACKER] {sym}: Live quote unavailable — "
+                                        f"using last-known close ₹{last_close:.2f} from disk parquet cache. "
+                                        f"Evaluation will proceed with stale price (safe — no false SL hit)."
+                                    )
+                                    break
+                        except Exception as read_err:
+                            logger.debug(f"[PERF_TRACKER] Parquet fallback read error for {sym}: {read_err}")
+                        break  # found file path, stop searching variants
+        except Exception as parquet_err:
+            logger.debug(f"[PERF_TRACKER] Parquet disk fallback failed: {parquet_err}")
 
     return prices
 

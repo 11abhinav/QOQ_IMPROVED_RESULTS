@@ -6,7 +6,12 @@ from data_providers.unified_fetcher import fetcher
 
 logger = logging.getLogger(__name__)
 _dead_symbols_cache = {}
-_DEAD_TTL = 3600 * 24  # 24 hours
+# [RULE 67 CHANGE-RATIONALE]: Reduced from 24h to 30 minutes.
+# A 24h dead TTL caused HEG and similar stocks to be permanently blocked after a single
+# transient quote failure (provider rate-limit / token expiry), producing repeated
+# '🚨 No live price available' ERROR spam in performance_tracker every 5 minutes.
+# 30 minutes allows the symbol to be retried on the next performance tracker cycle.
+_DEAD_TTL = 30 * 60  # 30 minutes
 _MAX_DEAD_CACHE_SIZE = 1000
 
 _recent_quotes_cache = {}
