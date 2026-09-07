@@ -235,15 +235,6 @@ class ShortCoveringEarlyIgnitionScanner:
                 scheduled_for=_SCHEDULE_STR,
                 run_id=run_ctx.run_id if run_ctx else None
             )
-            upsert_scanner_health(
-                scanner_name="SHORT_COVERING",
-                status="OK",
-                outcome="SUCCESS",
-                duration_seconds=dur,
-                today_alerts=len(new_alerts),
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
-                run_id=run_ctx.run_id if run_ctx else None
-            )
             return new_alerts
         except Exception as exc:
             dur = round(time.monotonic() - start_t, 2)

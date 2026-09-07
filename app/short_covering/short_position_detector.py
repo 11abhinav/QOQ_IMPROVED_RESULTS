@@ -90,13 +90,6 @@ class ShortPositionDetector:
                 scheduled_for="Daily 19:15 IST (Market Days)",
                 run_id=run_ctx.run_id if run_ctx else None
             )
-            upsert_scanner_health(
-                scanner_name="SHORT_COVERING",
-                status="RUNNING",
-                error_msg="EOD positioning analysis in progress...",
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
-                run_id=run_ctx.run_id if run_ctx else None
-            )
 
             candidates: List[EODShortPositionCandidate] = []
 
@@ -132,16 +125,6 @@ class ShortPositionDetector:
                 processed_count=len(candidates),
                 duration_seconds=dur,
                 scheduled_for="Daily 19:15 IST (Market Days)",
-                run_id=run_ctx.run_id if run_ctx else None
-            )
-            upsert_scanner_health(
-                scanner_name="SHORT_COVERING",
-                status="OK",
-                outcome="SUCCESS",
-                total_count=len(symbols),
-                processed_count=len(candidates),
-                duration_seconds=dur,
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
                 run_id=run_ctx.run_id if run_ctx else None
             )
             return candidates

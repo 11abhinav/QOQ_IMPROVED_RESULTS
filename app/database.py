@@ -3957,7 +3957,6 @@ def get_all_scanner_health() -> list[dict]:
         "WEALTH_EXIT": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
         "SHORT_COVERING_EOD": "Daily 19:15 IST (Market Days)",
         "SHORT_COVERING_5M": "Every 5m (09:20 - 15:25 IST Market Days)",
-        "SHORT_COVERING": "EOD 19:15 / 5m (09:20 - 15:25 IST)",
         "Pledge Worker": "Continuous (Daily Refresh)",
         "AI Worker": "Continuous (Sat-Sun Active)",
     }
@@ -4099,7 +4098,6 @@ def reset_all_scanners_on_boot() -> None:
                     "WEALTH_EXIT": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
                     "SHORT_COVERING_EOD": "Daily 19:15 IST (Market Days)",
                     "SHORT_COVERING_5M": "Every 5m (09:20 - 15:25 IST Market Days)",
-                    "SHORT_COVERING": "EOD 19:15 / 5m (09:20 - 15:25 IST)",
                     "Pledge Worker": "Continuous (Daily Refresh)",
                     "AI Worker": "Continuous (Sat-Sun Active)",
                 }
@@ -4254,7 +4252,7 @@ ALL_KNOWN_SCANNERS = [
     'DAILY_BUILDER', 'MULTI_TF', 'MULTI_TF_5M', 'EOD', 'REVERSAL',
     'PULLBACK', 'ACCUMULATION', 'Wealth Engine', 'MULTIBAGGER',
     'PERFORMANCE_TRACKER', 'MULTIBAGGER_EXIT', 'WEALTH_EXIT',
-    'SHORT_COVERING_EOD', 'SHORT_COVERING_5M', 'SHORT_COVERING',
+    'SHORT_COVERING_EOD', 'SHORT_COVERING_5M',
     'Pledge Worker', 'AI Worker', 'Earnings Calendar'
 ]
 
