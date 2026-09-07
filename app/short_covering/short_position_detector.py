@@ -41,8 +41,17 @@ class ShortPositionDetector:
     Scans the F&O universe at 19:15 IST daily.
     """
 
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        min_oi_buildup_5d_pct: float = 6.0,
+        min_short_buildup_ratio: float = 0.55,
+        max_rsi: float = 50.0,
+        min_quality_score: float = 50.0
+    ):
+        self.min_oi_buildup_5d_pct = min_oi_buildup_5d_pct
+        self.min_short_buildup_ratio = min_short_buildup_ratio
+        self.max_rsi = max_rsi
+        self.min_quality_score = min_quality_score
 
     def scan_eod_universe(
         self,

@@ -1143,10 +1143,10 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                         telemetry_logger.record_reject(symbol, "LIQUIDITY", "INSUFFICIENT_BARS", len(ticker) if "ticker" in locals() else 0, 50, start_time=_row_start_time)
                                     return
 
-                                # [PERFORMANCE_FIX] apply_indicators() is now pre-calculated by price_cache.py
-                                # immediately after downloading the dataset. Doing it once there instead of
-                                # 5000 times here eliminates 4-5 minutes of latency per batch!
-                                # ticker = apply_indicators(ticker, timeframe="1d")
+                                # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
+                                # Hydrate indicators on-demand for candidate evaluation in parallel worker thread.
+                                if "PRIOR_20D_HIGH" not in ticker.columns:
+                                    ticker = apply_indicators(ticker, timeframe="1d")
 
                                 if ticker is None or ticker.empty:
                                     with _batch_lock:

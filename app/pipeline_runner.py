@@ -110,11 +110,10 @@ class PipelineRunner:
         if rejection_reason:
             return "REJECTED"
 
-        # ──────────────────────────────────────────────────────────
-        # 2. Indicators Stage
-        # ──────────────────────────────────────────────────────────
-        # [PERFORMANCE_FIX] Pre-calculated by price_cache.py
-        # ticker = apply_indicators(ticker, timeframe="1d")
+        # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
+        # Hydrate indicators on-demand for deterministic pipeline execution.
+        if "RSI" not in ticker.columns or "PRIOR_20D_HIGH" not in ticker.columns:
+            ticker = apply_indicators(ticker, timeframe="1d")
         
         if ticker is None or ticker.empty:
             rejection_reason = "indicator_fail"

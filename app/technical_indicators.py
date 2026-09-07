@@ -22,7 +22,13 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
 
 import gc
-from memory_profiler import profile_function
+try:
+    from memory_profiler import profile_function
+except ImportError:
+    try:
+        from app.memory_profiler import profile_function
+    except ImportError:
+        def profile_function(f): return f
 
 try:
     import pandas_ta as ta
@@ -249,7 +255,8 @@ def _build_rolling_high_columns(df: pd.DataFrame, high: pd.Series, timeframe: st
 
 def _build_vwap_columns(df: pd.DataFrame, high: pd.Series, low: pd.Series, close: pd.Series, timeframe: str) -> Dict[str, pd.Series]:
     cols = {}
-    if "Volume" in df.columns:
+    vol_col = "Volume" if "Volume" in df.columns else ("volume" if "volume" in df.columns else None)
+    if vol_col is not None:
         typical_price = (high + low + close) / 3
         df_index = df.index
         if not isinstance(df_index, pd.DatetimeIndex):
@@ -259,12 +266,12 @@ def _build_vwap_columns(df: pd.DataFrame, high: pd.Series, low: pd.Series, close
 
         if timeframe in ("15m", "1h") and hasattr(df_index, 'date'):
             date_groups = df_index.date
-            cum_tp_vol  = (typical_price * df["Volume"]).groupby(date_groups).cumsum()
-            cum_vol     = df["Volume"].groupby(date_groups).cumsum()
+            cum_tp_vol  = (typical_price * df[vol_col]).groupby(date_groups).cumsum()
+            cum_vol     = df[vol_col].groupby(date_groups).cumsum()
             cols["VWAP"]  = (cum_tp_vol / cum_vol).where(cum_vol > 0)
         else:
-            cum_tp_vol  = (typical_price * df["Volume"]).cumsum()
-            cum_vol     = df["Volume"].cumsum()
+            cum_tp_vol  = (typical_price * df[vol_col]).cumsum()
+            cum_vol     = df[vol_col].cumsum()
             cols["VWAP"]  = (cum_tp_vol / cum_vol).where(cum_vol > 0)
     else:
         cols["VWAP"] = float("nan")
@@ -273,16 +280,18 @@ def _build_vwap_columns(df: pd.DataFrame, high: pd.Series, low: pd.Series, close
 
 def _build_obv_columns(df: pd.DataFrame) -> Dict[str, pd.Series]:
     cols = {}
-    if "Volume" in df.columns and len(df) >= 50:
-        obv_direction = np.sign(df["Close"].diff())
+    vol_col = "Volume" if "Volume" in df.columns else ("volume" if "volume" in df.columns else None)
+    close_col = "Close" if "Close" in df.columns else ("close" if "close" in df.columns else None)
+    if vol_col is not None and close_col is not None and len(df) >= 50:
+        obv_direction = np.sign(df[close_col].diff())
         obv_direction.iloc[0] = 0
 
-        raw_obv = (obv_direction * df["Volume"]).cumsum()
+        raw_obv = (obv_direction * df[vol_col]).cumsum()
         cols["OBV_20MA"] = raw_obv.rolling(window=20, min_periods=20).mean()
         cols["OBV"] = raw_obv
         cols["OBV_SLOPE"] = raw_obv.diff(3)
 
-        rolling_obv = (obv_direction * df["Volume"]).rolling(50, min_periods=50).sum()
+        rolling_obv = (obv_direction * df[vol_col]).rolling(50, min_periods=50).sum()
         obv_slope = rolling_obv.diff(5)
 
         conds = [obv_slope > 0, obv_slope < 0]
@@ -345,9 +354,13 @@ def hydrate_indicators(
         return df
 
     df = df.copy()
-    close = df["Close"]
-    high  = df["High"]
-    low   = df["Low"]
+    close = df["Close"] if "Close" in df.columns else (df["close"] if "close" in df.columns else None)
+    high  = df["High"] if "High" in df.columns else (df["high"] if "high" in df.columns else None)
+    low   = df["Low"] if "Low" in df.columns else (df["low"] if "low" in df.columns else None)
+    
+    if close is None or high is None or low is None:
+        return df
+
     new_cols: Dict[str, Any] = {}
 
     req_all = (required is None or len(required) == 0)

@@ -2186,7 +2186,12 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
                         else:
                             fundamental_valid += 1
 
-                        ticker = ticker_data.copy()
+                        # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
+                        # Hydrate indicators on-demand for candidate evaluation if not already computed.
+                        if "RSI" not in ticker_data.columns or "SMA200" not in ticker_data.columns:
+                            ticker = apply_indicators(ticker_data, timeframe="1d")
+                        else:
+                            ticker = ticker_data.copy()
                         verdict = _evaluate_candidate(
                             symbol=symbol,
                             df=ticker,
