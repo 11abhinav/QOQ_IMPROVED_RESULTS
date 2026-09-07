@@ -309,7 +309,6 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
                 _GEOMETRY_CACHE[cache_key] = c_res
             return sym_idx, sym, None, c_res, (time.perf_counter() - t_s_start) * 1000.0, t_cp, t_ff, t_ds, False
 
-        import concurrent.futures
         max_workers = min(8, max(2, (os.cpu_count() or 4)))
         results_by_idx = {}
         completed_count = 0
@@ -1043,7 +1042,8 @@ def _process_symbol(
             funnel_counters["INVALID_ATR"] += 1
         return
 
-    current_price = float(bundle.df_5m_closed["Close"].iloc[-1])
+    c_col_5m = 'Close' if 'Close' in bundle.df_5m_closed.columns else ('close' if 'close' in bundle.df_5m_closed.columns else bundle.df_5m_closed.columns[0])
+    current_price = float(bundle.df_5m_closed[c_col_5m].iloc[-1])
 
     # 2. Setup Detection (15m strictly closed)
     # [FIX: CONSOLIDATION_MAP_REUSE_v1.0] Use pre-computed result from pre-screen if available.
@@ -1215,7 +1215,8 @@ def _process_symbol(
             )
 
             # ── 5M EARLY BREAKOUT CONTRACT ──
-            c_5m = float(bundle.df_5m_closed["Close"].iloc[-1])
+            c_col_5m = 'Close' if 'Close' in bundle.df_5m_closed.columns else ('close' if 'close' in bundle.df_5m_closed.columns else bundle.df_5m_closed.columns[0])
+            c_5m = float(bundle.df_5m_closed[c_col_5m].iloc[-1])
             buffer_atr = config.get("BREAKOUT_BUFFER_ATR_MULT", 0.10) * (atr_5m if atr_5m > 0 else 1.0)
             res_line = consolidation.box_high
 
