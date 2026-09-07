@@ -605,6 +605,27 @@ class ShortCoveringEarlyIgnitionScanner:
                     if hasattr(conn, "commit"):
                         conn.commit()
             logger.info(f"💾 Persisted {len(alerts)} alerts to short_covering_alerts table")
+
+            # Canonical alerts table sync for trade dashboard, health, and exit tracking
+            try:
+                from database import save_alert_if_new
+                for a in alerts:
+                    save_alert_if_new({
+                        "symbol": a.symbol,
+                        "scanner": "SHORT_COVERING_5M",
+                        "category": "SHORT_COVERING",
+                        "signals": f"Short Covering Ignition [{a.grade}] (OI: {a.excess_oi_contraction}%, Surge: {a.volume_surge_ratio}x)",
+                        "entry_price": float(a.ignition_price) if a.ignition_price else None,
+                        "alert_time": a.timestamp.isoformat() if hasattr(a.timestamp, "isoformat") else str(a.timestamp),
+                        "alert_date": a.timestamp.date().isoformat() if hasattr(a.timestamp, "date") else str(a.timestamp)[:10],
+                        "stop_loss": float(a.stop_loss) if a.stop_loss else None,
+                        "target_price": float(a.initial_target) if a.initial_target else None,
+                        "target_1": float(a.initial_target) if a.initial_target else None,
+                        "score": float(a.ignition_score) if a.ignition_score else None,
+                        "status": "OPEN",
+                    })
+            except Exception as _al_err:
+                logger.warning(f"Could not save short covering alert to canonical alerts table: {_al_err}")
         except Exception as e:
             # RULE 67 RATIONALE: Re-raise DB persistence error when database is configured so that
             # scanner_health accurately reflects FAILURE / DOWN status rather than fake success.

@@ -4082,6 +4082,33 @@ def reset_all_scanners_on_boot() -> None:
                         updated_at = NOW()
                     WHERE status IN ('DOWN', 'RUNNING') OR status LIKE 'QUEUED%';
                 """)
+                now_str = datetime.now(IST).isoformat()
+                schedule_map = {
+                    "DAILY_BUILDER": "Daily 05:00 IST",
+                    "MULTI_TF": "Every 15m Scan / 5m Monitor (09:30 - 15:30 IST)",
+                    "MULTI_TF_5M": "Every 5min Monitor (09:35 - 15:25 IST)",
+                    "EOD": "Daily 18:30 IST (Post-Bhavcopy Delivery)",
+                    "REVERSAL": "Daily 18:30 IST (Post-Bhavcopy Delivery)",
+                    "PULLBACK": "Daily 18:30 IST (Post-Bhavcopy Delivery)",
+                    "ACCUMULATION": "Daily 18:35 IST (Post-Bhavcopy / Verified Evening Batch)",
+                    "TECHNICAL": "Daily 18:15 IST (Post-Close Technical Scan)",
+                    "Wealth Engine": "Daily 06:00 & 17:00 IST · Market Hours (09:15 - 15:30)",
+                    "MULTIBAGGER": "Daily 17:30 IST (Daily Fundamental)",
+                    "PERFORMANCE_TRACKER": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
+                    "MULTIBAGGER_EXIT": "Exit Monitor · Every 15min (09:15 - 15:30 IST)",
+                    "WEALTH_EXIT": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
+                    "SHORT_COVERING_EOD": "Daily 19:15 IST (Market Days)",
+                    "SHORT_COVERING_5M": "Every 5m (09:20 - 15:25 IST Market Days)",
+                    "SHORT_COVERING": "EOD 19:15 / 5m (09:20 - 15:25 IST)",
+                    "Pledge Worker": "Continuous (Daily Refresh)",
+                    "AI Worker": "Continuous (Sat-Sun Active)",
+                }
+                for sc_name, sched_str in schedule_map.items():
+                    cur.execute("""
+                        INSERT INTO scanner_health (scanner_name, status, scheduled_for, updated_at)
+                        VALUES (%s, 'IDLE', %s, %s)
+                        ON CONFLICT (scanner_name) DO UPDATE SET scheduled_for = EXCLUDED.scheduled_for
+                    """, (sc_name, sched_str, now_str))
                 conn.commit()
         logger.info("🧹 [BOOT RESET] All scanner health statuses reset to clean OK state on server startup.")
     except Exception as e:
@@ -4224,9 +4251,10 @@ def resume_scanner(scanner_name: str) -> bool:
 
 
 ALL_KNOWN_SCANNERS = [
-    'DAILY_BUILDER', 'MULTI_TF', 'EOD', 'REVERSAL',
+    'DAILY_BUILDER', 'MULTI_TF', 'MULTI_TF_5M', 'EOD', 'REVERSAL',
     'PULLBACK', 'ACCUMULATION', 'Wealth Engine', 'MULTIBAGGER',
     'PERFORMANCE_TRACKER', 'MULTIBAGGER_EXIT', 'WEALTH_EXIT',
+    'SHORT_COVERING_EOD', 'SHORT_COVERING_5M', 'SHORT_COVERING',
     'Pledge Worker', 'AI Worker', 'Earnings Calendar'
 ]
 
