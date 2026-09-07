@@ -1207,6 +1207,11 @@ def run_system_scheduler():
     verify_scans_ran = False
     last_wealth_market_run = None  # Track last market-hours wealth run
     last_wealth_full_scan_run = None  # Track last market-hours full scan (15m BUY alert cycle)
+    last_short_covering_5m = None  # Track last 5m short-covering ignition run
+    last_short_covering_eod_date = None  # Track last EOD short-covering positioning run
+    last_technical_date = None
+    last_multibagger_date = None
+    last_wealth_daily_date = None
 
     def safe_run_daily_builder():
         """Helper to run the builder and update the memory cache."""
@@ -1753,6 +1758,23 @@ def run_system_scheduler():
                                     name=f"MultiTF-5m-{slot_5m.strftime('%H%M')}",
                                     daemon=True
                                 ).start()
+
+                    # 4. Short Covering 5m Ignition Scanner (every 5 mins during market hours: 09:20 - 15:25 IST)
+                    if (now_mtf.hour > 9 or (now_mtf.hour == 9 and now_mtf.minute >= 20)) and (now_mtf.hour < 15 or (now_mtf.hour == 15 and now_mtf.minute <= 25)):
+                        slot_sc_min = (now_mtf.minute // 5) * 5
+                        slot_sc = now_mtf.replace(minute=slot_sc_min, second=0, microsecond=0)
+                        if now_mtf >= (slot_sc + _td(seconds=10)):
+                            if last_short_covering_5m is None or slot_sc > last_short_covering_5m:
+                                last_short_covering_5m = slot_sc
+                                if not is_scanner_stopped("SHORT_COVERING_5M") and not is_scanner_stopped("SHORT_COVERING"):
+                                    logger.info(f"⚡ SHORT_COVERING (5M IGNITION) | Starting 5m cycle for slot {slot_sc.strftime('%H:%M')} IST...")
+                                    import threading
+                                    threading.Thread(
+                                        target=_trigger_short_covering_5m,
+                                        kwargs={"trigger_type": "SCHEDULED", "scheduler_name": "CRON"},
+                                        name=f"ShortCovering-5m-{slot_sc.strftime('%H%M')}",
+                                        daemon=True
+                                    ).start()
                 
                 check_scanner_staleness(now)
                 
@@ -1864,6 +1886,25 @@ def run_system_scheduler():
                 else:
                     logger.info("⏭️ MULTIBAGGER is STOPPED by Admin. Skipping 17:30 IST run.")
 
+            # 19:15 - Short Covering Layer 1 EOD Positioning Detector (Trading Days Only)
+            if (now.hour > 19 or (now.hour == 19 and now.minute >= 15)) and last_short_covering_eod_date != now.date():
+                last_short_covering_eod_date = now.date()
+                if not is_scanner_stopped("SHORT_COVERING_EOD") and not is_scanner_stopped("SHORT_COVERING"):
+                    from trading_calendar import is_trading_day
+                    if is_trading_day(now.date()):
+                        logger.info("🕒 SCHEDULER | [19:15 IST] Triggering SHORT COVERING EOD Positioning Detector...")
+                        import threading
+                        threading.Thread(
+                            target=_trigger_short_covering_eod,
+                            kwargs={"trigger_type": "SCHEDULED", "scheduler_name": "CRON"},
+                            name="ShortCovering-EOD",
+                            daemon=True
+                        ).start()
+                    else:
+                        logger.info("⏭️ Non-trading day. Skipping Short Covering EOD.")
+                else:
+                    logger.info("⏭️ SHORT_COVERING_EOD is STOPPED by Admin. Skipping 19:15 IST run.")
+
             # Earnings Calendar removed — earnings data was unused and added latency.
 
             # Midnight session rotation — triggered once on date boundary
@@ -1904,13 +1945,16 @@ def check_scanner_staleness(now):
         "MULTI_TF_5M":         15,       # runs every 5 min
         "PERFORMANCE_TRACKER": 15,       # runs every 5 min
         "WEALTH_EXIT":         15,       # runs every 5 min during market hours
+        "SHORT_COVERING_5M":   15,       # runs every 5 min during market hours
+        "SHORT_COVERING":      15,       # runs every 5 min during market hours
         "Wealth Engine":       "DAILY",  # runs full scan once daily at 17:00 IST
         "DAILY_BUILDER":       "DAILY",
         "EOD":                 "DAILY",
         "REVERSAL":            "DAILY",
         "PULLBACK":            "DAILY",
         "ACCUMULATION":        "DAILY",
-        "MULTIBAGGER":         "DAILY"
+        "MULTIBAGGER":         "DAILY",
+        "SHORT_COVERING_EOD":  "DAILY",  # runs daily at 19:15 IST
     }
     
     # Throttle: only run this check every 15 minutes
@@ -2294,6 +2338,8 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
         "ACCUMULATION":  _trigger_accumulation,
         "TECHNICAL":     _trigger_technical,
         "SHORT_COVERING": _trigger_short_covering,
+        "SHORT_COVERING_EOD": _trigger_short_covering_eod,
+        "SHORT_COVERING_5M": _trigger_short_covering_5m,
     }
     
     fn = TRIGGER_MAP.get(scanner_key)
@@ -2316,7 +2362,9 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
         "Earnings Calendar": lambda: None,  # removed
         "ACCUMULATION":  lambda: __import__('accumulation_scanner')._accumulation_run_lock,
         "TECHNICAL":     lambda: __import__('technical_scanner')._scan_lock,
-        "SHORT_COVERING": lambda: None,
+        "SHORT_COVERING": lambda: __import__('short_covering.short_covering_scanner', fromlist=['_scan_lock_5m'])._scan_lock_5m,
+        "SHORT_COVERING_EOD": lambda: __import__('short_covering.short_position_detector', fromlist=['_eod_lock'])._eod_lock,
+        "SHORT_COVERING_5M": lambda: __import__('short_covering.short_covering_scanner', fromlist=['_scan_lock_5m'])._scan_lock_5m,
     }
 
     
@@ -2559,22 +2607,32 @@ def _trigger_wealth_exit():
     run_wealth_intraday_update()
     return {"total_count": 1, "processed_count": 1}
 
-def _trigger_short_covering(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
-    """Triggers Short-Covering scan (Layer 1 EOD or Layer 2 Intraday 5m cycle)."""
+def _trigger_short_covering_eod():
+    """Triggers Layer 1 EOD Short-Positioning buildup detector."""
+    try:
+        from app.short_covering.short_position_detector import short_position_detector
+        candidates = short_position_detector.scan_eod_universe()
+        return {"total_count": len(candidates), "processed_count": len(candidates), "type": "EOD_WATCHLIST"}
+    except Exception as e:
+        logger.error(f"❌ Error triggering EOD short covering scan: {e}")
+        return {"total_count": 0, "processed_count": 0, "error": str(e)}
+
+def _trigger_short_covering_5m():
+    """Triggers Layer 2 Intraday 5m Short-Covering ignition scan."""
     try:
         from app.short_covering.short_covering_scanner import short_covering_scanner
-        from app.short_covering.short_position_detector import short_position_detector
-        # If EOD context, run Layer 1 positioning detector
-        if run_ctx == "EOD" or trigger_type == "EOD":
-            candidates = short_position_detector.scan_eod_universe()
-            return {"total_count": len(candidates), "processed_count": len(candidates), "type": "EOD_WATCHLIST"}
-        else:
-            # Intraday 5m ignition cycle
-            alerts = short_covering_scanner.run_5m_scan_cycle()
-            return {"total_count": len(alerts), "processed_count": len(alerts), "type": "INTRADAY_IGNITION"}
+        alerts = short_covering_scanner.run_5m_scan_cycle()
+        return {"total_count": len(alerts), "processed_count": len(alerts), "type": "INTRADAY_IGNITION"}
     except Exception as e:
-        logger.error(f"❌ Error triggering short covering scan: {e}")
+        logger.error(f"❌ Error triggering 5M short covering scan: {e}")
         return {"total_count": 0, "processed_count": 0, "error": str(e)}
+
+def _trigger_short_covering(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
+    """Triggers Short-Covering scan (Layer 1 EOD or Layer 2 Intraday 5m cycle)."""
+    if run_ctx == "EOD" or trigger_type == "EOD":
+        return _trigger_short_covering_eod()
+    else:
+        return _trigger_short_covering_5m()
 
 
 

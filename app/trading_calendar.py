@@ -104,6 +104,47 @@ class TradingCalendar:
 default_trading_calendar = TradingCalendar()
 
 
+def is_trading_day(val: Union[datetime, date, str]) -> bool:
+    """
+    Returns True if the given date is an official NSE trading day (not weekend or market holiday).
+    """
+    d = TradingCalendar._parse_date(val)
+    if d is None:
+        return False
+    return default_trading_calendar.is_trading_day(d)
+
+
+def get_latest_trading_date(val: Optional[Union[datetime, date, str]] = None) -> date:
+    """
+    Resolves to the most recent valid trading session date on or before the given date.
+    E.g. Sunday -> Friday, Monday holiday -> Friday.
+    """
+    if val is None:
+        curr = datetime.now(IST).date()
+    else:
+        curr = TradingCalendar._parse_date(val) or datetime.now(IST).date()
+
+    while not default_trading_calendar.is_trading_day(curr):
+        curr -= timedelta(days=1)
+    return curr
+
+
+def get_previous_trading_date(val: Optional[Union[datetime, date, str]] = None) -> date:
+    """
+    Resolves to the valid trading session date strictly prior to the given date.
+    E.g. Monday -> Friday, Tuesday after Monday holiday -> Friday.
+    """
+    if val is None:
+        curr = datetime.now(IST).date()
+    else:
+        curr = TradingCalendar._parse_date(val) or datetime.now(IST).date()
+
+    curr -= timedelta(days=1)
+    while not default_trading_calendar.is_trading_day(curr):
+        curr -= timedelta(days=1)
+    return curr
+
+
 def is_weekend_date(val: Union[datetime, date, str]) -> bool:
     """
     Returns True if the given date/timestamp lands on a Saturday (5) or Sunday (6).

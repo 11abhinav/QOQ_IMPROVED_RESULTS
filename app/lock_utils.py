@@ -41,6 +41,12 @@ SCANNER_CONFIG = {
     "ACCUMULATION":       {"emoji": "📦", "display": "ACCUMULATION SCANNER", "db_name": "ACCUMULATION"},
     "daily_builder":      {"emoji": "🏗️", "display": "DAILY BUILDER",       "db_name": "DAILY_BUILDER"},
     "DAILY_BUILDER":      {"emoji": "🏗️", "display": "DAILY BUILDER",       "db_name": "DAILY_BUILDER"},
+    "short_covering":     {"emoji": "⚡", "display": "SHORT COVERING",        "db_name": "SHORT_COVERING"},
+    "SHORT_COVERING":     {"emoji": "⚡", "display": "SHORT COVERING",        "db_name": "SHORT_COVERING"},
+    "short_covering_eod": {"emoji": "⚡", "display": "SHORT COVERING EOD",    "db_name": "SHORT_COVERING_EOD"},
+    "SHORT_COVERING_EOD": {"emoji": "⚡", "display": "SHORT COVERING EOD",    "db_name": "SHORT_COVERING_EOD"},
+    "short_covering_5m":  {"emoji": "⚡", "display": "SHORT COVERING 5M",     "db_name": "SHORT_COVERING_5M"},
+    "SHORT_COVERING_5M":  {"emoji": "⚡", "display": "SHORT COVERING 5M",     "db_name": "SHORT_COVERING_5M"},
 }
 
 _BAR_LEN = 30
@@ -445,6 +451,14 @@ class ProcessLockImpl:
             self.thread_lock.release()
         except Exception:
             pass
+
+    def locked(self) -> bool:
+        """Returns True if the lock is currently held."""
+        return bool(self.is_acquired)
+
+    def is_locked(self) -> bool:
+        """Alias for locked()."""
+        return bool(self.is_acquired)
 
 
 def release_global_lock_if_held_by(scanner_name: str):

@@ -15,8 +15,10 @@ Features:
 
 import os
 import logging
+import time
 from datetime import datetime, date
 from typing import List, Dict, Optional, Set, Tuple, Any
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 
@@ -28,8 +30,18 @@ from app.short_covering.short_covering_schema import (
     ShortCoveringSignal,
     ShortCoveringState,
 )
+try:
+    from app.lock_utils import ProcessLock
+    from app.database import upsert_scanner_health
+    from app.trading_calendar import get_latest_trading_date, is_trading_day
+except ImportError:
+    from lock_utils import ProcessLock
+    from database import upsert_scanner_health
+    from trading_calendar import get_latest_trading_date, is_trading_day
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
+_scan_lock_5m = ProcessLock("short_covering_5m_lock")
 
 
 class ShortCoveringEarlyIgnitionScanner:
@@ -52,6 +64,32 @@ class ShortCoveringEarlyIgnitionScanner:
         self._tracked_states: Dict[str, Dict] = {}
         self._last_scan_date: Optional[date] = None
 
+    def check_watchlist_freshness(self, target_date: date) -> Tuple[bool, Optional[date], date]:
+        """
+        Verifies that short_covering_watchlist has candidates from the latest valid trading session.
+        Returns (is_fresh, latest_watchlist_date, expected_trading_date).
+        """
+        expected_date = target_date if is_trading_day(target_date) else get_latest_trading_date(target_date)
+        if not os.getenv("DATABASE_URL") or os.getenv("DISABLE_DB_OI_LOOKUP"):
+            return True, expected_date, expected_date
+        try:
+            from app.database import get_connection
+            with get_connection(timeout=1) as conn:
+                if hasattr(conn, "is_dummy") and conn.is_dummy:
+                    return True, expected_date, expected_date
+                with conn.cursor() as cur:
+                    cur.execute("SELECT MAX(scan_date) FROM short_covering_watchlist;")
+                    row = cur.fetchone()
+                    max_date = row[0] if row and row[0] else None
+                    if max_date is None:
+                        return False, None, expected_date
+                    # Consider fresh if within 1 trading day
+                    is_fresh = (max_date >= expected_date) or (get_latest_trading_date(expected_date) <= max_date)
+                    return is_fresh, max_date, expected_date
+        except Exception as e:
+            logger.debug("Failed to check watchlist freshness: %s", e)
+            return True, expected_date, expected_date
+
     def run_5m_scan_cycle(
         self,
         current_time: Optional[datetime] = None,
@@ -63,46 +101,118 @@ class ShortCoveringEarlyIgnitionScanner:
         Returns newly triggered CONFIRMED_IGNITION ShortCoveringSignal alerts.
         """
         if current_time is None:
-            current_time = datetime.now()
+            current_time = datetime.now(IST)
 
         today = current_time.date()
         if self._last_scan_date != today:
             self._tracked_states.clear()
             self._last_scan_date = today
 
-        if candidate_watchlist is None:
-            candidate_watchlist = self._load_eod_watchlist(today) if persist_db else None
+        logger.info("[SHORT_COVERING_5M] Acquiring lock: short_covering_5m_lock")
+        if not _scan_lock_5m.acquire(blocking=False):
+            logger.warning("🛑 [SHORT_COVERING_5M] Lock 'short_covering_5m_lock' held by another instance. Skipping duplicate cycle.")
+            return []
 
-        if candidate_watchlist is not None:
-            candidate_map = {c.symbol: c for c in candidate_watchlist}
-            symbols_to_scan = list(candidate_map.keys())
-        else:
-            candidate_map = {}
-            symbols_to_scan = fno_universe_manager.get_fno_symbols()[:60]
-
-        logger.debug(f"⚡ [Layer 2 5m Scanner] Starting cycle at {current_time.strftime('%H:%M:%S')} across {len(symbols_to_scan)} symbols")
-
-        new_alerts: List[ShortCoveringSignal] = []
-        nifty_oi_5m_delta = self._get_index_5m_oi_delta(current_time)
-
-        for symbol in symbols_to_scan:
-            try:
-                signal = self.evaluate_symbol_5m(
-                    symbol=symbol,
-                    current_time=current_time,
-                    eod_candidate=candidate_map.get(symbol),
-                    nifty_oi_5m_delta=nifty_oi_5m_delta
+        start_t = time.monotonic()
+        _SCHEDULE_STR = "Every 5m (09:20 - 15:25 IST Market Days)"
+        try:
+            # 1. Check Watchlist Freshness Guard
+            is_fresh, max_date, expected_date = self.check_watchlist_freshness(today)
+            if not is_fresh and candidate_watchlist is None:
+                logger.warning(
+                    "⚠️ [SHORT_COVERING_5M] Stale watchlist detected (Latest: %s, Expected: %s). Refusing to scan obsolete candidates.",
+                    max_date, expected_date
                 )
-                if signal is not None and signal.state == ShortCoveringState.CONFIRMED_IGNITION:
-                    new_alerts.append(signal)
-                    logger.info(f"🚨 [SHORT COVERING ALERT] {symbol} | Price={signal.ignition_price:.2f} | Latency={signal.alert_latency_minutes:.0f}m | Score={signal.ignition_score:.1f} ({signal.grade})")
-            except Exception as e:
-                logger.debug(f"Error in 5m evaluation for {symbol}: {e}")
+                upsert_scanner_health(
+                    scanner_name="SHORT_COVERING_5M",
+                    status="OK",
+                    outcome="SKIPPED",
+                    error_msg=f"STALE_WATCHLIST (Latest: {max_date}, Expected: {expected_date})",
+                    duration_seconds=round(time.monotonic() - start_t, 2),
+                    scheduled_for=_SCHEDULE_STR
+                )
+                return []
 
-        if new_alerts and persist_db:
-            self._persist_alerts(new_alerts)
+            if candidate_watchlist is None:
+                candidate_watchlist = self._load_eod_watchlist(today) if persist_db else None
 
-        return new_alerts
+            if candidate_watchlist:
+                candidate_map = {c.symbol: c for c in candidate_watchlist}
+                symbols_to_scan = list(candidate_map.keys())
+            else:
+                candidate_map = {}
+                symbols_to_scan = []
+
+            if not symbols_to_scan:
+                logger.info("ℹ️ [SHORT_COVERING_5M] No active short-covering candidates in watchlist. Cycle complete.")
+                upsert_scanner_health(
+                    scanner_name="SHORT_COVERING_5M",
+                    status="OK",
+                    outcome="SUCCESS",
+                    total_count=0,
+                    processed_count=0,
+                    duration_seconds=round(time.monotonic() - start_t, 2),
+                    scheduled_for=_SCHEDULE_STR
+                )
+                return []
+
+            logger.info("⚡ [SHORT_COVERING_5M] Starting 5m ignition cycle at %s across %d candidates", current_time.strftime("%H:%M:%S"), len(symbols_to_scan))
+
+            new_alerts: List[ShortCoveringSignal] = []
+            nifty_oi_5m_delta = self._get_index_5m_oi_delta(current_time)
+
+            for symbol in symbols_to_scan:
+                try:
+                    signal = self.evaluate_symbol_5m(
+                        symbol=symbol,
+                        current_time=current_time,
+                        eod_candidate=candidate_map.get(symbol),
+                        nifty_oi_5m_delta=nifty_oi_5m_delta
+                    )
+                    if signal is not None and signal.state == ShortCoveringState.CONFIRMED_IGNITION:
+                        new_alerts.append(signal)
+                        logger.info("🚨 [SHORT COVERING ALERT] %s | Price=%.2f | Latency=%.0fm | Score=%.1f (%s)",
+                                    symbol, signal.ignition_price, signal.alert_latency_minutes, signal.ignition_score, signal.grade)
+                except Exception as e:
+                    logger.debug("Error in 5m evaluation for %s: %s", symbol, e)
+
+            if new_alerts and persist_db:
+                self._persist_alerts(new_alerts)
+
+            dur = round(time.monotonic() - start_t, 2)
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING_5M",
+                status="OK",
+                outcome="SUCCESS",
+                total_count=len(symbols_to_scan),
+                processed_count=len(new_alerts),
+                today_alerts=len(new_alerts),
+                duration_seconds=dur,
+                scheduled_for=_SCHEDULE_STR
+            )
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING",
+                status="OK",
+                outcome="SUCCESS",
+                duration_seconds=dur,
+                today_alerts=len(new_alerts),
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+            )
+            return new_alerts
+        except Exception as exc:
+            dur = round(time.monotonic() - start_t, 2)
+            logger.exception("❌ [SHORT_COVERING_5M] Cycle failed: %s", exc)
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING_5M",
+                status="DOWN",
+                outcome="FAILURE",
+                error_msg=str(exc),
+                duration_seconds=dur,
+                scheduled_for=_SCHEDULE_STR
+            )
+            return []
+        finally:
+            _scan_lock_5m.release()
 
 
     def evaluate_symbol_5m(

@@ -4140,6 +4140,12 @@ def normalize_scanner_name(scanner_name: str) -> str:
         return "AI Worker"
     elif upper in ["PLEDGE_WORKER"]:
         return "Pledge Worker"
+    elif upper in ["SHORT_COVERING_EOD", "SHORT_POSITION_DETECTOR"]:
+        return "SHORT_COVERING_EOD"
+    elif upper in ["SHORT_COVERING_5M", "SHORT_COVERING_IGNITION"]:
+        return "SHORT_COVERING_5M"
+    elif upper in ["SHORT_COVERING", "SHORTCOVERING"]:
+        return "SHORT_COVERING"
     return s
 
 

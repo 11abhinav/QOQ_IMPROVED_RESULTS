@@ -11,16 +11,28 @@ Objective:
 
 import os
 import logging
+import time
 from datetime import date, datetime
 from typing import List, Dict, Optional, Tuple
+from zoneinfo import ZoneInfo
 import pandas as pd
 import numpy as np
 
 from app.short_covering.fno_universe import fno_universe_manager
 from app.short_covering.oi_data_service import oi_data_service
 from app.short_covering.short_covering_schema import EODShortPositionCandidate
+try:
+    from app.lock_utils import ProcessLock
+    from app.database import upsert_scanner_health
+    from app.trading_calendar import get_latest_trading_date, is_trading_day
+except ImportError:
+    from lock_utils import ProcessLock
+    from database import upsert_scanner_health
+    from trading_calendar import get_latest_trading_date, is_trading_day
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
+_eod_lock = ProcessLock("short_covering_eod_lock")
 
 
 class ShortPositionDetector:
@@ -46,30 +58,85 @@ class ShortPositionDetector:
         Scans the F&O universe at EOD to identify stocks with accumulated short positions.
         Returns a list of high-quality candidates sorted by buildup quality score.
         """
-        if as_of is None:
-            as_of = date.today()
+        target_date = as_of or datetime.now(IST).date()
+        # Resolve to latest valid trading day (e.g. Monday resolves to today or Friday; weekends resolve to Friday)
+        valid_trading_date = get_latest_trading_date(target_date) if not is_trading_day(target_date) else target_date
 
-        symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
-        candidates: List[EODShortPositionCandidate] = []
+        logger.info("[SHORT_COVERING_EOD] Acquiring lock: short_covering_eod_lock")
+        if not _eod_lock.acquire(blocking=False):
+            logger.warning("🛑 [SHORT_COVERING_EOD] Lock 'short_covering_eod_lock' held by another instance. Skipping duplicate run.")
+            return []
 
-        logger.debug(f"🔍 [Layer 1 EOD Engine] Starting scan across {len(symbols)} F&O symbols for date: {as_of}")
+        start_t = time.monotonic()
+        try:
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING_EOD",
+                status="RUNNING",
+                error_msg="EOD positioning analysis in progress...",
+                scheduled_for="Daily 19:15 IST (Market Days)"
+            )
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING",
+                status="RUNNING",
+                error_msg="EOD positioning analysis in progress...",
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+            )
 
-        for symbol in symbols:
-            try:
-                candidate = self.evaluate_symbol(symbol, as_of)
-                if candidate is not None:
-                    candidates.append(candidate)
-            except Exception as e:
-                logger.debug(f"Error evaluating EOD candidate for {symbol}: {e}")
+            symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
+            candidates: List[EODShortPositionCandidate] = []
 
-        # Sort descending by buildup quality score
-        candidates.sort(key=lambda c: c.buildup_quality_score, reverse=True)
-        logger.debug(f"✅ [Layer 1 EOD Engine] Found {len(candidates)} short-buildup candidates for next-day watchlist")
+            logger.info("🔍 [SHORT_COVERING_EOD] Scanning %d F&O symbols for trading date: %s", len(symbols), valid_trading_date)
 
-        # Persist to database if requested
-        if persist_db:
-            self._persist_candidates_to_db(candidates, as_of)
-        return candidates
+            for symbol in symbols:
+                try:
+                    candidate = self.evaluate_symbol(symbol, valid_trading_date)
+                    if candidate is not None:
+                        candidates.append(candidate)
+                except Exception as e:
+                    logger.debug("Error evaluating EOD candidate for %s: %s", symbol, e)
+
+            # Sort descending by buildup quality score
+            candidates.sort(key=lambda c: c.buildup_quality_score, reverse=True)
+            logger.info("✅ [SHORT_COVERING_EOD] Identified %d short-buildup candidates for next-day watchlist", len(candidates))
+
+            # Persist to database if requested
+            if persist_db:
+                self._persist_candidates_to_db(candidates, valid_trading_date)
+
+            dur = round(time.monotonic() - start_t, 2)
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING_EOD",
+                status="OK",
+                outcome="SUCCESS",
+                total_count=len(symbols),
+                processed_count=len(candidates),
+                duration_seconds=dur,
+                scheduled_for="Daily 19:15 IST (Market Days)"
+            )
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING",
+                status="OK",
+                outcome="SUCCESS",
+                total_count=len(symbols),
+                processed_count=len(candidates),
+                duration_seconds=dur,
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+            )
+            return candidates
+        except Exception as exc:
+            dur = round(time.monotonic() - start_t, 2)
+            logger.exception("❌ [SHORT_COVERING_EOD] Scan failed: %s", exc)
+            upsert_scanner_health(
+                scanner_name="SHORT_COVERING_EOD",
+                status="DOWN",
+                outcome="FAILURE",
+                error_msg=str(exc),
+                duration_seconds=dur,
+                scheduled_for="Daily 19:15 IST (Market Days)"
+            )
+            return []
+        finally:
+            _eod_lock.release()
 
 
     def evaluate_symbol(
