@@ -301,8 +301,8 @@ class UpstoxProvider(ProviderInterface):
         from datetime import timedelta
         
         # [VERSION: NON_EQUITY_BLOCKLIST_v2.0] Filter only known InvITs/REITs (never ASM/GSM equities)
-        _NON_EQUITY_TRUSTS = {"VERTIS", "HIGHWAYS", "POWERINVIT", "IRBINVIT", "INDIGRID", "EMBASSY", "MINDSPACE", "BROOKFIELD", "NEXUS"}
-        if symbol and str(symbol).strip().upper() in _NON_EQUITY_TRUSTS:
+        non_equity_blocklist = getattr(config, "NON_EQUITY_BLOCKLIST", {"VERTIS", "HIGHWAYS", "POWERINVIT", "IRBINVIT", "INDIGRID", "EMBASSY", "MINDSPACE", "BROOKFIELD", "NEXUS"})
+        if symbol and str(symbol).strip().upper() in non_equity_blocklist:
             start_time = datetime.now()
             prov = DataProvenance(self.provider_name, start_time, 0.0, 0)
             return NormalizedMarketData(symbol, timeframe, pd.DataFrame(), prov, error="Blacklisted non-equity trust")

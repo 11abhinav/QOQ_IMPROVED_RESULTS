@@ -119,6 +119,18 @@ class FyersAdapter(BaseProviderAdapter):
         except Exception as reg_err:
             logger.debug(f"Registry lookup error for {symbol}: {reg_err}")
 
+        # 2. Authoritative Fyers Master Symbol Mapper (Includes -SM, -ST, -BE, -EQ)
+        try:
+            from data_providers.fyers_symbol_mapper import fyers_mapper
+            mapped = fyers_mapper.get_fyers_symbol(sym)
+            if mapped:
+                inst_id = metadata.instrument_id if metadata else f"EQ:{sym}"
+                exch = mapped.split(":")[0] if ":" in mapped else ("BSE" if force_bse else "NSE")
+                srs = mapped.split("-")[-1] if "-" in mapped else "EQ"
+                return ResolvedInstrument(inst_id, sym, "fyers", mapped, exch, srs, 100, "MASTER")
+        except Exception as mapper_err:
+            logger.debug(f"Fyers symbol mapper lookup error for {symbol}: {mapper_err}")
+
         # Standard equity fallback for clean symbols
         if not sym.startswith("UNKNOWN") and not str(symbol).startswith("^"):
             prefix = "BSE:" if force_bse else "NSE:"

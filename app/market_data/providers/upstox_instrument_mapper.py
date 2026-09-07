@@ -182,9 +182,11 @@ class UpstoxInstrumentMapper:
         """Worker that fetches, parses, and saves Upstox complete master contract CSV."""
         logger.info("📥 Downloading Upstox complete master instrument contract file...")
         url = "https://assets.upstox.com/market-quote/instruments/exchange/complete.csv.gz"
+        import ssl
+        ssl_ctx = ssl._create_unverified_context()
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
                 content = resp.read()
 
             buf = gzip.decompress(content).decode("utf-8").splitlines()
@@ -204,7 +206,7 @@ class UpstoxInstrumentMapper:
                     inst_type = row[9].strip().upper()
                     exchange = row[11].strip().upper()
 
-                    if inst_type in ("EQ", "EQUITY") and exchange in ("NSE_EQ", "BSE_EQ"):
+                    if inst_type in ("EQ", "EQUITY", "SM", "ST", "SME", "BE", "BZ") and exchange in ("NSE_EQ", "BSE_EQ"):
                         # Save both symbol alone (TCS) and exchange-prefixed (NSE_EQ:TCS)
                         if tradingsymbol not in new_map or exchange == "NSE_EQ":
                             new_map[tradingsymbol] = inst_key

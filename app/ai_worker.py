@@ -86,7 +86,8 @@ def run_ai_worker_scan_once() -> dict:
                 except Exception as e:
                     logger.warning(f"Failed to load exclusion list {excluded_csv_path}: {e}")
                     
-        pending_stocks = sorted(list(set(pending_stocks)))
+        from config import NON_EQUITY_BLOCKLIST
+        pending_stocks = sorted([s for s in set(pending_stocks) if str(s).strip().upper() not in NON_EQUITY_BLOCKLIST])
         total_stocks = len(pending_stocks)
         
         # ── Pre-filter: only process stocks that genuinely need analysis ────────────────
@@ -262,7 +263,8 @@ def run_worker_loop():
         if idx_symbols:
             symbols_set.update(idx_symbols)
             
-        symbols = list(symbols_set)
+        from config import NON_EQUITY_BLOCKLIST
+        symbols = [s for s in list(symbols_set) if str(s).strip().upper() not in NON_EQUITY_BLOCKLIST]
         total_watch = len(symbols)
         stats = get_ai_concall_stats(symbols)
         processed_count = stats.get("total_cached", 0)

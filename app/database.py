@@ -7630,7 +7630,9 @@ def get_multitf_universe() -> list:
                     logger.warning(f"[MULTI_TF_UNIVERSE] Error querying breakout_watchlist: {ex_bw}")
                     counts["breakout_watchlist"] = 0
 
-        final_symbols = sorted(list(symbols))
+        import config
+        non_equity_blocklist = getattr(config, "NON_EQUITY_BLOCKLIST", set())
+        final_symbols = [s for s in sorted(list(symbols)) if s.upper() not in non_equity_blocklist]
         if final_symbols:
             logger.info(
                 f"[MULTI_TF_UNIVERSE] Loaded {len(final_symbols)} distinct symbols "
@@ -7647,6 +7649,9 @@ def get_multitf_universe() -> list:
     # Fallback to get_elite_watchlist()
     fallback = get_elite_watchlist()
     if fallback:
+        import config
+        non_equity_blocklist = getattr(config, "NON_EQUITY_BLOCKLIST", set())
+        fallback = [s for s in fallback if s.upper() not in non_equity_blocklist]
         logger.warning(f"[MULTI_TF_UNIVERSE] Falling back to get_elite_watchlist() ({len(fallback)} symbols)")
         return fallback
     return []

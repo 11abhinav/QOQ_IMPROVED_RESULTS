@@ -24,6 +24,12 @@ class UnifiedFetcher:
         self.fyers = FyersFetcher()
 
     def fetch_historical(self, symbol: str, interval: str, period: str, consumer: str) -> Optional[pd.DataFrame]:
+        from config import NON_EQUITY_BLOCKLIST
+        clean_sym = str(symbol).replace('.NS', '').replace('.BO', '').replace('BSE:', '').replace('NSE:', '').strip().upper()
+        if clean_sym in NON_EQUITY_BLOCKLIST:
+            logger.info(f"ℹ️ Skipping non-equity trust {symbol} in UnifiedFetcher")
+            return pd.DataFrame()
+
         logger.info(f"[{consumer}] Fetching {symbol} ({interval} / {period}) via UnifiedFetcher")
         
         dataset_id = f"price_{interval}"

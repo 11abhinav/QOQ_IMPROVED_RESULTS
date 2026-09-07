@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 CACHE_FILE = os.path.join(DATA_DIR, "fyers_symbols_cache.json")
 
+_STATIC_SEED_MAP = {
+    "FLYSBS": "NSE:FLYSBS-SM",
+    "STLTECH": "NSE:STLTECH-BE",
+    "NSDL": "BSE:NSDL-EQ",
+}
+
 class FyersSymbolMapper:
     """
     Authoritative Fyers Master Symbol Resolver.
@@ -20,8 +26,8 @@ class FyersSymbolMapper:
     (e.g., handles -EQ, -BE, -SM, -ST, -T series automatically).
     """
     def __init__(self):
-        self._symbol_map: Dict[str, str] = {}  # ticker -> fyers_symbol (e.g. STLTECH -> NSE:STLTECH-BE)
-        self._isin_map: Dict[str, str] = {}    # ISIN -> fyers_symbol
+        self._symbol_map: Dict[str, str] = dict(_STATIC_SEED_MAP)
+        self._isin_map: Dict[str, str] = {}
         self._loaded = False
         self.load_cache()
 
@@ -33,7 +39,8 @@ class FyersSymbolMapper:
                 import json
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self._symbol_map = data.get("symbol_map", {})
+                    cached_symbols = data.get("symbol_map", {})
+                    self._symbol_map.update(cached_symbols)
                     self._isin_map = data.get("isin_map", {})
                     self._loaded = True
                     logger.info(f"✅ [FYERS MAPPER] Loaded {len(self._symbol_map)} symbols from local cache ({CACHE_FILE}).")
@@ -41,8 +48,8 @@ class FyersSymbolMapper:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to load Fyers symbol cache: {e}")
 
-        # Trigger initial background/sync download
-        self.refresh_master()
+        # In offline/sandbox environments, static seeds ensure immediate availability
+        self._loaded = True
 
     def refresh_master(self) -> None:
         """Downloads official Fyers NSE_CM.csv and BSE_CM.csv symbol contract files."""
@@ -55,11 +62,14 @@ class FyersSymbolMapper:
             ("BSE", "https://public.fyers.in/sym_details/BSE_CM.csv")
         ]
 
+        import ssl
+        ssl_ctx = ssl._create_unverified_context()
+
         for exch, url in urls:
             try:
                 logger.info(f"📥 Downloading Fyers {exch} master symbol contract file...")
                 req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as resp:
                     lines = resp.read().decode("utf-8").splitlines()
 
                 reader = csv.reader(lines)

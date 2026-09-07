@@ -331,6 +331,11 @@ def fetch_watchlist_data(watchlist: Any, period: str = "10d", interval: str = "1
     else:
         watchlist = pd.DataFrame({"Stock": []})
 
+    # [VERSION: NON_EQUITY_BLOCKLIST_v2.0] Filter non-equity trusts from all price fetching
+    from config import NON_EQUITY_BLOCKLIST
+    if not watchlist.empty and "Stock" in watchlist.columns:
+        watchlist = watchlist[~watchlist["Stock"].astype(str).str.upper().isin(NON_EQUITY_BLOCKLIST)].copy()
+
     # [VERSION: UNIFIED_1Y_CACHE_v2.0] Standardize all 1d requests to "1y" so EOD, Reversal, Pullback,
     # Wealth Engine and Multibagger all share one single cache key ("1d", "1y").
     if interval == "1d" and period in ("6mo", "1mo", "10d", "3mo", "2y"):
@@ -1486,11 +1491,23 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
             # Persistence is now decoupled and handled once per fetch cycle via generation coalescing.
 
     successful_syms = []
+    failed_syms = []
     for sym in symbols:
         df = all_data.get(sym)
         if df is None or isinstance(df, ProviderResult) or not isinstance(df, pd.DataFrame) or df.empty:
+            failed_syms.append(sym)
             try:
-                upsert_fetch_error('fyers', 'PRICE_CACHE', sym, interval, 'no_data_after_fetch', 'no_data_returned')
+                import config
+                active_providers = getattr(config, "PROVIDER_ROUTING_POLICY", {}).get(f"price_{interval}", ["fyers", "upstox"])
+                provider_desc = "+".join(active_providers)
+                upsert_fetch_error(
+                    'UNIFIED_PIPELINE',
+                    'PRICE_CACHE',
+                    sym,
+                    interval,
+                    'no_data_after_fetch',
+                    f"Exhausted active providers [{provider_desc}] for {sym} [{interval}]"
+                )
             except Exception:
                 pass
             all_data[sym] = None
@@ -1502,6 +1519,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
     if successful_syms:
         try:
             from database import delete_fetch_errors_batch_on_success
+            delete_fetch_errors_batch_on_success('UNIFIED_PIPELINE', 'PRICE_CACHE', successful_syms, interval, 'no_data_after_fetch')
             delete_fetch_errors_batch_on_success('fyers', 'PRICE_CACHE', successful_syms, interval, 'no_data_after_fetch')
         except Exception:
             pass

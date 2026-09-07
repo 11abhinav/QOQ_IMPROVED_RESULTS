@@ -377,9 +377,12 @@ class FyersFetcher(DataFetcher):
             candidates.append(f"BSE:{base}-EQ")
             candidates.append(f"NSE:{base}-EQ")
         else:
-            # Standard NSE:SYMBOL-EQ first, then BSE:SYMBOL-EQ
+            # Standard NSE:SYMBOL-EQ first, then BSE:SYMBOL-EQ, then SME series (-SM, -ST, -BE)
             candidates.append(f"NSE:{base}-EQ")
             candidates.append(f"BSE:{base}-EQ")
+            candidates.append(f"NSE:{base}-SM")
+            candidates.append(f"NSE:{base}-ST")
+            candidates.append(f"NSE:{base}-BE")
 
             # Known BSE scrip code map for stocks with custom Fyers BSE tickers
             # CRITICAL: Always use BSE:CODE-EQ (with -EQ suffix). Bare BSE:CODE
@@ -460,8 +463,8 @@ class FyersFetcher(DataFetcher):
         else:
             orig_sym = orig_sym.replace("_", "-")
         # [VERSION: NON_EQUITY_BLOCKLIST_v2.0] Filter only known InvITs/REITs (never ASM/GSM equities)
-        _NON_EQUITY_TRUSTS = {"VERTIS", "HIGHWAYS", "POWERINVIT", "IRBINVIT", "INDIGRID", "EMBASSY", "MINDSPACE", "BROOKFIELD", "NEXUS"}
-        if orig_sym and orig_sym.upper() in _NON_EQUITY_TRUSTS:
+        from config import NON_EQUITY_BLOCKLIST
+        if orig_sym and orig_sym.upper() in NON_EQUITY_BLOCKLIST:
             return None
         try:
 

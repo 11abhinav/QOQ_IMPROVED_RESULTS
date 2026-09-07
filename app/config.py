@@ -50,6 +50,13 @@ DB_PATH = os.path.join(DATA_DIR, "alerts.db")
 # Path for NSE constituent disk cache (Fix RCA-MB-2)
 CONSTITUENT_CACHE_PATH = os.path.join(DATA_DIR, "constituent_cache.json")
 
+# [VERSION: NON_EQUITY_BLOCKLIST_v2.0] Authoritative blocklist for non-equity trusts (InvITs / REITs)
+# These instruments do not have standard equity breakout patterns and must not enter equity scanners.
+NON_EQUITY_BLOCKLIST = {
+    "VERTIS", "HIGHWAYS", "POWERINVIT", "IRBINVIT", "INDIGRID",
+    "EMBASSY", "MINDSPACE", "BROOKFIELD", "NEXUS"
+}
+
 # =====================================================================================
 # RESILIENCE / FALLBACK CONFIGURATION
 # =====================================================================================
