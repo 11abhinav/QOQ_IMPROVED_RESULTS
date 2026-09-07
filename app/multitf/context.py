@@ -26,15 +26,21 @@ def evaluate_1h_context(df_1h: Optional[pd.DataFrame], config: Dict[str, Any]) -
         return {"score": 0, "label": "NO_DATA"}
 
     try:
+        # [RULE 67 CHANGE-RATIONALE: TARGETED_1H_CONTEXT_HYDRATION_v1.0]
+        # Hydrate trend indicators on-demand if missing in raw 1h OHLCV DataFrame
+        if "EMA9" not in df_1h.columns and "EMA_9" not in df_1h.columns and len(df_1h) >= 20:
+            from technical_indicators import hydrate_indicators
+            df_1h = hydrate_indicators(df_1h, required={"EMA9", "EMA20", "SMA50", "SMA200"}, timeframe="1h")
+
         last = df_1h.iloc[-1]
         c = last["Close"]
-        e9 = last.get("EMA_9")
-        e20 = last.get("EMA_20")
-        s50 = last.get("SMA_50")
-        s200 = last.get("SMA_200")
+        e9 = last.get("EMA9") if last.get("EMA9") is not None else last.get("EMA_9")
+        e20 = last.get("EMA20") if last.get("EMA20") is not None else last.get("EMA_20")
+        s50 = last.get("SMA50") if last.get("SMA50") is not None else last.get("SMA_50")
+        s200 = last.get("SMA200") if last.get("SMA200") is not None else last.get("SMA_200")
 
         # Fallbacks if indicators are missing
-        if any(pd.isna(x) for x in (e9, e20, s50)):
+        if any(x is None or pd.isna(x) for x in (e9, e20, s50)):
             return {"score": 0, "label": "NEUTRAL"}
 
         is_bullish = (e9 > e20) and (e20 > s50)

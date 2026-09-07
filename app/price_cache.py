@@ -306,7 +306,7 @@ def get_dynamic_cadence(interval: str) -> int:
 
 # [VERSION: MEMORY_RECALIBRATION_v1.0] Recalibrated profile budget from 350 MB to 500 MB to match steady-state process RSS.
 @profile_function("Price Fetch", budget_mb=500.0)
-def fetch_watchlist_data(watchlist: Any, period: str = "10d", interval: str = "15m", requester: str = None, run_ctx: Any = None) -> dict[str, pd.DataFrame]:
+def fetch_watchlist_data(watchlist: Any, period: str = "10d", interval: str = "15m", requester: str = None, run_ctx: Any = None, required_indicators: Optional[Set[str]] = None) -> dict[str, pd.DataFrame]:
     global _cache_hits, _cache_misses
     from telemetry_manager import telemetry
     
@@ -551,6 +551,14 @@ def fetch_watchlist_data(watchlist: Any, period: str = "10d", interval: str = "1
                                 df_val.iloc[-1, col_idx] = close_dtype.type(lp_float) if hasattr(close_dtype, 'type') else lp_float
             except Exception as _cmp_sync_err:
                 logger.debug(f"Post-market 1d CMP overlay warning: {_cmp_sync_err}")
+
+    # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
+    # If the caller explicitly requested a set of indicators, hydrate them on the in-memory results.
+    if required_indicators is not None:
+        from technical_indicators import hydrate_indicators
+        for s, df_val in final_res.items():
+            if df_val is not None and isinstance(df_val, pd.DataFrame) and not df_val.empty:
+                final_res[s] = hydrate_indicators(df_val, required=required_indicators, timeframe=interval)
 
     return final_res
 
@@ -922,11 +930,8 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                             except Exception:
                                 pass
 
-                        if not cached_df.empty and (not meta_valid or "EMA20" not in cached_df.columns):
-                            from technical_indicators import apply_indicators
-                            cached_df = apply_indicators(cached_df, timeframe=interval)
+                        if not cached_df.empty and not meta_valid:
                             try:
-                                cached_df.to_parquet(file_path)
                                 new_meta = {
                                     "schema_version": CACHE_SCHEMA_VERSION,
                                     "indicator_version": INDICATOR_VERSION,
@@ -937,7 +942,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                                 with open(meta_path, "w") as f:
                                     json.dump(new_meta, f)
                             except Exception as e:
-                                logger.warning(f"Failed to resave enriched cache for {sym}: {e}")
+                                logger.warning(f"Failed to resave meta for {sym}: {e}")
                                 
                         with local_lock:
                             all_data[sym] = cached_df
@@ -1015,6 +1020,10 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
 
     # Process each coalesced group
     any_parquet_written = False
+    t_broker_total = 0.0
+    t_merge_total = 0.0
+    t_write_total = 0.0
+
     for group_key, items in coalesced_groups.items():
         group_symbols = [item[0] for item in items]
         group_total = len(group_symbols)
@@ -1029,7 +1038,9 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
             sample_str = ", ".join(random.sample(batch, min(3, len(batch))))
             logger.info(f"[{requester}] 📥 Fetching Batch {desc} ({i}–{batch_end}/{group_total}) [{interval}] (e.g., {sample_str})")
             
+            _t_b0 = time.monotonic()
             batch_results = fetcher.get_batch_ohlcv(batch, interval=interval, period=period, retries=3, range_from=range_from, range_to=range_to, caller=requester)
+            t_broker_total += (time.monotonic() - _t_b0)
             
             if batch_results:
                 batch_validation_items = []
@@ -1182,6 +1193,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                             continue
                             
                     if new_df is not None and not new_df.empty:
+                        _t_m0 = time.monotonic()
                         # [VERSION: TIMEZONE_FIX_v1.0] True timezone normalization at ingestion boundary
                         time_col = 'Date' if 'Date' in new_df.columns else ('Datetime' if 'Datetime' in new_df.columns else None)
                         if time_col:
@@ -1347,50 +1359,19 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                                 except Exception as stitch_err:
                                     logger.warning(f"Failed to stitch Bhavcopy data for {sym}: {stitch_err}")
 
-                            batch_indicator_jobs.append({
-                                "symbol": sym,
-                                "timeframe": interval,
-                                "dataframe": all_data[sym]
-                            })
-                            batch_symbol_meta[sym] = {
-                                "new_df": new_df,
-                                "new_report": new_report
-                            }
-                    else:
-                        # Fallback to stale cached data if fresh fetch returned empty
-                        if cached_df is not None and not cached_df.empty:
-                            _mark_cache_staleness(cached_df)
-                            all_data[sym] = cached_df
+                        t_merge_total += (time.monotonic() - _t_m0)
 
-                # Run indicator calculations concurrently for all symbols in this batch
-                batch_earliest_updates: dict[str, str] = {}
-                if batch_indicator_jobs:
-                    from indicator_executor import indicator_executor
-                    exec_res = indicator_executor.execute(batch_indicator_jobs)
-                    for job in batch_indicator_jobs:
-                        sym = job["symbol"]
-                        if sym in exec_res and exec_res[sym] is not None:
-                            all_data[sym] = exec_res[sym]
+                        # [RULE 67 CHANGE-RATIONALE: CANONICAL_RAW_SCHEMA_ENFORCEMENT_v1.0]
+                        # Enforce canonical raw cache invariant: disk Parquets strictly store raw OHLCV + timestamps.
+                        raw_allowed_cols = {'Open', 'High', 'Low', 'Close', 'Volume', 'Date', 'Datetime', 'timestamp'}
+                        keep_cols = [c for c in all_data[sym].columns if c in raw_allowed_cols]
+                        if keep_cols and len(keep_cols) < len(all_data[sym].columns):
+                            all_data[sym] = all_data[sym][keep_cols].copy()
 
-                        meta_info = batch_symbol_meta.get(sym, {})
-                        n_df = meta_info.get("new_df")
-                        n_rep = meta_info.get("new_report")
-
-                        # Record earliest date into batch dict (saved once after loop)
-                        if group_key == "FULL" and n_df is not None and not n_df.empty and len(n_df) >= 10 and period.lower() in ("max", "10y", "5y", "2y", "1y", "ytd"):
-                            try:
-                                t_col = 'Date' if 'Date' in n_df.columns else ('Datetime' if 'Datetime' in n_df.columns else None)
-                                earliest_ts = pd.to_datetime(n_df[t_col].iloc[0]) if t_col else pd.to_datetime(n_df.index[0])
-                                earliest_dt_str = earliest_ts.date().isoformat() if hasattr(earliest_ts, 'date') else None
-                                if earliest_dt_str:
-                                    clean_sym = sym.replace('.NS', '').replace('.BO', '').replace('BSE:', '').replace('NSE:', '').strip().upper()
-                                    batch_earliest_updates[sym] = earliest_dt_str
-                                    batch_earliest_updates[clean_sym] = earliest_dt_str
-                                    batch_earliest_updates[f"NSE:{clean_sym}"] = earliest_dt_str
-                            except Exception as e:
-                                logger.debug(f"Failed to record earliest date for {sym}: {e}")
-
-                        # Save back to disk
+                        # [RULE 67 CHANGE-RATIONALE: DECOUPLE_RAW_CACHE_PERSISTENCE_v1.0]
+                        # Save raw merged OHLCV DataFrame directly to Parquet on disk without blocking
+                        # on full 35+ indicator calculations. Scanners consume raw data or hydrate on-demand.
+                        _t_w0 = time.monotonic()
                         try:
                             file_path = os.path.join(history_dir, f"{sym.replace(':', '_')}.parquet")
                             if isinstance(all_data[sym].columns, pd.MultiIndex):
@@ -1415,15 +1396,16 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                             all_data[sym].to_parquet(tmp_file_path, compression='snappy')
                             os.replace(tmp_file_path, file_path)
                             any_parquet_written = True
+                            t_write_total += (time.monotonic() - _t_w0)
 
                             meta_path = file_path.replace('.parquet', '.meta.json')
-                            val_score = getattr(n_rep, 'quality_score', 100) if n_rep else 100
+                            val_score = getattr(new_report, 'quality_score', 100) if new_report else 100
                             if not isinstance(val_score, (int, float)): val_score = 100
 
-                            val_status = getattr(n_rep, 'status', 'ValidationStatus.VALID') if n_rep else 'ValidationStatus.VALID'
+                            val_status = getattr(new_report, 'status', 'ValidationStatus.VALID') if new_report else 'ValidationStatus.VALID'
                             if not isinstance(val_status, str): val_status = str(val_status)
 
-                            val_name = getattr(n_rep, 'validator_name', 'Unknown') if n_rep else 'Unknown'
+                            val_name = getattr(new_report, 'validator_name', 'Unknown') if new_report else 'Unknown'
                             if not isinstance(val_name, str): val_name = str(val_name)
 
                             meta = {
@@ -1445,6 +1427,25 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                                 logger.warning(f"Disk write error for {sym}: {oe}")
                         except Exception as e:
                             logger.exception(f"Failed to write disk cache for {sym}")
+
+                        # Record earliest date into batch dict (saved once after loop)
+                        if group_key == "FULL" and new_df is not None and not new_df.empty and len(new_df) >= 10 and period.lower() in ("max", "10y", "5y", "2y", "1y", "ytd"):
+                            try:
+                                t_col = 'Date' if 'Date' in new_df.columns else ('Datetime' if 'Datetime' in new_df.columns else None)
+                                earliest_ts = pd.to_datetime(new_df[t_col].iloc[0]) if t_col else pd.to_datetime(new_df.index[0])
+                                earliest_dt_str = earliest_ts.date().isoformat() if hasattr(earliest_ts, 'date') else None
+                                if earliest_dt_str:
+                                    clean_sym = sym.replace('.NS', '').replace('.BO', '').replace('BSE:', '').replace('NSE:', '').strip().upper()
+                                    batch_earliest_updates[sym] = earliest_dt_str
+                                    batch_earliest_updates[clean_sym] = earliest_dt_str
+                                    batch_earliest_updates[f"NSE:{clean_sym}"] = earliest_dt_str
+                            except Exception as e:
+                                logger.debug(f"Failed to record earliest date for {sym}: {e}")
+                    else:
+                        # Fallback to stale cached data if fresh fetch returned empty
+                        if cached_df is not None and not cached_df.empty:
+                            _mark_cache_staleness(cached_df)
+                            all_data[sym] = cached_df
 
                 # Batch write earliest_dates.json ONCE per sub-chunk instead of N times in loop
                 if batch_earliest_updates:
@@ -1514,7 +1515,10 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
         else:
             successful_syms.append(sym)
 
-    logger.info(f"✅ Data secured for {len(successful_syms)}/{total} symbols [{interval}]")
+    logger.info(
+        f"✅ Data secured for {len(successful_syms)}/{total} symbols [{interval}] | "
+        f"Stage Timings: BrokerFetch={t_broker_total:.2f}s, RawMerge={t_merge_total:.2f}s, DiskWrite={t_write_total:.2f}s"
+    )
 
     if successful_syms:
         try:
