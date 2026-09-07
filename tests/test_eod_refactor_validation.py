@@ -148,12 +148,12 @@ class TestEODRefactorValidation(unittest.TestCase):
         res_pass = _check_eod_conditions(ticker=ticker_pass, latest=ticker_pass.iloc[-1], symbol="TEST_ATR_PASS")
         self.assertTrue(res_pass["passed"], f"ATR10=120 on prev_close=4800 should pass, failed: {res_pass.get('reason')}")
         
-        # Case B: ATR10 = 121 -> 121 / 4800 = 2.5208% > 2.5% -> REJECT
-        ticker_fail = _make_ticker(close_price=close_px, high_52w=5100.0, prev_close=prev_px, atr10_val=121.0)
+        # Case B: ATR10 = 220 -> 220 / 4800 = 4.5833% > 4.50% -> REJECT under Model A
+        ticker_fail = _make_ticker(close_price=close_px, high_52w=5100.0, prev_close=prev_px, atr10_val=220.0)
         res_fail = _check_eod_conditions(ticker=ticker_fail, latest=ticker_fail.iloc[-1], symbol="TEST_ATR_FAIL")
-        self.assertFalse(res_fail["passed"], "ATR10=121 / 4800 = 2.52% must be rejected")
-        self.assertIn("tightness floor", res_fail["reason"])
-        self.assertIn("2.52%", res_fail["reason"])
+        self.assertFalse(res_fail["passed"], "ATR10=220 / 4800 = 4.58% must be rejected")
+        self.assertIn("tightness ceiling", res_fail["reason"])
+        self.assertIn("4.58%", res_fail["reason"])
 
     def test_04_penalty_buckets_and_triple_fault(self):
         """

@@ -46,12 +46,14 @@ class ShortPositionDetector:
         min_oi_buildup_5d_pct: float = 6.0,
         min_short_buildup_ratio: float = 0.55,
         max_rsi: float = 50.0,
-        min_quality_score: float = 50.0
+        min_quality_score: float = 50.0,
+        max_watchlist_size: int = 35
     ):
         self.min_oi_buildup_5d_pct = min_oi_buildup_5d_pct
         self.min_short_buildup_ratio = min_short_buildup_ratio
         self.max_rsi = max_rsi
         self.min_quality_score = min_quality_score
+        self.max_watchlist_size = max_watchlist_size
 
     def scan_eod_universe(
         self,
@@ -238,7 +240,9 @@ class ShortPositionDetector:
             score += 20.0
             reasons.append("1d OI stall/reduction with bullish lower wick")
 
-        if score < 35.0:
+        # RULE 67 RATIONALE: Enforce self.min_quality_score (50.0+) rather than an arbitrary loose
+        # 35.0 threshold to prevent low-conviction or noisy synthetic candidates from entering the watchlist.
+        if score < self.min_quality_score:
             return None
 
         sector = fno_universe_manager.get_sector(symbol)
@@ -301,9 +305,14 @@ class ShortPositionDetector:
         return float(np.mean(tr[-period:]))
 
     def _persist_candidates_to_db(self, candidates: List[EODShortPositionCandidate], as_of: date) -> None:
-        """Persists next-day short-covering watchlist to database."""
+        """Persists next-day short-covering watchlist to database with clean daily refresh and Top-N cap."""
         if not os.getenv("DATABASE_URL") or os.getenv("DISABLE_DB_OI_LOOKUP"):
             return
+        
+        # RULE 67 RATIONALE: Truncate candidate list to top self.max_watchlist_size (default 35)
+        # to ensure intraday Layer 2 monitors only the highest-conviction institutional setups.
+        top_candidates = candidates[:self.max_watchlist_size]
+
         try:
             from app.database import get_connection
             with get_connection(timeout=1) as conn:
@@ -330,7 +339,13 @@ class ShortPositionDetector:
                         );
                         CREATE INDEX IF NOT EXISTS idx_sc_watchlist_date ON short_covering_watchlist(scan_date);
                     """)
-                    for c in candidates:
+
+                    # RULE 67 RATIONALE: Cleanly delete all existing watchlist records for this session date
+                    # before inserting the fresh Top-N candidates. This guarantees full idempotency and prevents
+                    # stale, rejected, or obsolete stocks from lingering across re-runs.
+                    cur.execute("DELETE FROM short_covering_watchlist WHERE scan_date = %s;", (as_of,))
+
+                    for c in top_candidates:
                         cur.execute("""
                             INSERT INTO short_covering_watchlist (
                                 symbol, scan_date, close_price, total_oi, oi_buildup_5d_pct,
@@ -355,7 +370,7 @@ class ShortPositionDetector:
                         ))
                     if hasattr(conn, "commit"):
                         conn.commit()
-            logger.info(f"💾 Persisted {len(candidates)} candidates to short_covering_watchlist table")
+            logger.info(f"💾 Persisted {len(top_candidates)} top candidates to short_covering_watchlist table (wiped prior records for {as_of})")
         except Exception as e:
             # RULE 67 RATIONALE: Re-raise DB write failure when database is configured so that
             # scanner_health records DOWN / FAILURE instead of a misleading healthy/success state.

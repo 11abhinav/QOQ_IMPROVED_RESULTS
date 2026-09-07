@@ -432,12 +432,10 @@ def init_db():
                     )
                 """)
                 try:
-                    cur.execute("SAVEPOINT index_savepoint;")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_master_symbols_active ON master_symbols(is_active)")
                     cur.execute("CREATE INDEX IF NOT EXISTS idx_master_symbols_search ON master_symbols(symbol, company_name)")
-                    cur.execute("RELEASE SAVEPOINT index_savepoint;")
-                except Exception:
-                    cur.execute("ROLLBACK TO SAVEPOINT index_savepoint;")
+                except Exception as e:
+                    logger.debug(f"Index creation notice on master_symbols: {e}")
 
                 # 3. candidates
                 cur.execute("""
@@ -2251,13 +2249,13 @@ def delete_todays_alerts_for_scanner(scanner_name: str, trade_date: str, conn = 
             )
         """, (scanner_name, trade_date))
         cur.execute("""
-            DELETE FROM alert_exit_events
+            DELETE FROM alert_events
             WHERE alert_id IN (
                 SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
             )
         """, (scanner_name, trade_date))
         cur.execute("""
-            DELETE FROM alert_lifecycle_events
+            DELETE FROM trade_audit_log
             WHERE alert_id IN (
                 SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
             )
@@ -2913,7 +2911,6 @@ def save_alert_if_new(
             # Record initial NEW_ENTRY event into alert_events
             try:
                 cand_ctx = context or {}
-                cur.execute("SAVEPOINT sp_alert_events")
                 cur.execute("""
                     INSERT INTO alert_events
                         (alert_id, symbol, scanner, pattern, event_type, event_date, event_time,
@@ -2933,13 +2930,8 @@ def save_alert_if_new(
                       target_1 or (entry_price * 1.08 if entry_price else 0.0), 8.0,
                       2.0, stop_loss or (entry_price * 0.95 if entry_price else 0.0),
                       f"Initial {scanner or 'TECHNICAL'} entry on {today_date}."))
-                cur.execute("RELEASE SAVEPOINT sp_alert_events")
                 commit_cb()
             except Exception as _init_ev_err:
-                try:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_alert_events")
-                except Exception:
-                    pass
                 logger.debug(f"Initial alert_events record error: {_init_ev_err}")
 
             rs_bonus_val = kwargs.get('rs_bonus', 0)
@@ -2956,7 +2948,6 @@ def save_alert_if_new(
             ed_info = {"earnings_flag": False, "days_to_earnings": 999, "earnings_date": None, "earnings_severity": "NONE", "date_status": "UNKNOWN", "warning_msg": ""}
 
             try:
-                cur.execute("SAVEPOINT sp_alert_outcomes")
                 cur.execute("""
                     INSERT INTO alert_outcomes
                         (alert_id, leg, symbol, scanner, regime, regime_score, base_score, rs_bonus, sector_bonus,
@@ -2970,13 +2961,8 @@ def save_alert_if_new(
                       rr_val, atr_pct_val, entry_price or 0.0, stop_loss or 0.0, target_1 or 0.0, target_2, target_3, target_4,
                       ed_info["earnings_flag"], ed_info["days_to_earnings"], ed_info["earnings_date"],
                       ed_info["earnings_severity"], ed_info["date_status"]))
-                cur.execute("RELEASE SAVEPOINT sp_alert_outcomes")
                 commit_cb()
             except Exception as oe:
-                try:
-                    cur.execute("ROLLBACK TO SAVEPOINT sp_alert_outcomes")
-                except Exception:
-                    pass
                 logger.error(f"Failed to snapshot alert_outcome for alert {alert_id}: {oe}")
 
             msg = f'{symbol} | {category} | Buy: ₹{entry_price} | SL: ₹{stop_loss} | T1: ₹{target_1}'

@@ -1375,6 +1375,7 @@ def run_technical_scan(
     run_ctx: Any = None,
     trigger_type: str = "SCHEDULED",
     scheduler_name: str = "CRON",
+    session: Any = None,
 ) -> int:
     """
     Main Execution Entry Point for Unified TECHNICAL Scanner.
@@ -1477,6 +1478,7 @@ def run_technical_scan(
             )
             telemetry.log_scheduler_event("TECHNICAL", "CYCLE_COMPLETE")
             if real_run_ctx:
+                real_run_ctx.set_total_stocks(0)
                 complete_scanner_execution_run(real_run_ctx)
             return 0
 
@@ -1488,16 +1490,23 @@ def run_technical_scan(
         except Exception:
             pass
 
+        if real_run_ctx:
+            real_run_ctx.set_total_stocks(len(watchlist))
+
         logger.info(f"📋 [TECHNICAL] Screening {len(watchlist)} universe stocks on Daily timeframe...")
 
-        # 2. Fetch 1d OHLCV Data for Watchlist
-        all_1d = fetch_watchlist_data(
-            watchlist,
-            period="1y",
-            interval="1d",
-            requester="TECHNICAL",
-            run_ctx=real_run_ctx,
-        )
+        # 2. Fetch 1d OHLCV Data for Watchlist (reuse pre-warmed session if available)
+        if session is not None and getattr(session, "all_1d", None):
+            all_1d = session.all_1d
+            logger.info(f"⚡ [TECHNICAL] Reusing pre-warmed MarketDataSession 1D OHLCV data for {len(all_1d)} symbols.")
+        else:
+            all_1d = fetch_watchlist_data(
+                watchlist,
+                period="1y",
+                interval="1d",
+                requester="TECHNICAL",
+                run_ctx=real_run_ctx,
+            )
 
         qualified_candidates: List[Dict[str, Any]] = []
         rejection_counts: Dict[str, int] = {}
@@ -1514,8 +1523,19 @@ def run_technical_scan(
         for symbol in watchlist:
             df = all_1d.get(symbol)
             if df is None or df.empty:
+                if real_run_ctx:
+                    real_run_ctx.mark_incomplete(1)
                 rejection_counts["NO_DATA"] = rejection_counts.get("NO_DATA", 0) + 1
                 continue
+
+            # Track data freshness / staleness in execution context
+            is_stale = getattr(df, "_is_stale", False)
+            if is_stale:
+                if real_run_ctx:
+                    real_run_ctx.mark_stale(1)
+            else:
+                if real_run_ctx:
+                    real_run_ctx.mark_fresh(1)
 
             funnel_stats["data_fetched"] += 1
 
@@ -1677,6 +1697,7 @@ def run_technical_scan(
 
         telemetry.log_scheduler_event("TECHNICAL", "CYCLE_COMPLETE")
         if real_run_ctx:
+            real_run_ctx.set_alerts(alerts_saved)
             complete_scanner_execution_run(real_run_ctx)
 
         if alerts_saved > 0:

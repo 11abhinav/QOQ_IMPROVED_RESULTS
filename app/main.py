@@ -1106,6 +1106,7 @@ def run_all_seven_scanners_non_market_boot():
             ("EOD", _trigger_eod),
             ("REVERSAL", _trigger_reversal),
             ("PULLBACK", _trigger_pullback),
+            ("TECHNICAL", _trigger_technical),
             ("Wealth Engine", _trigger_wealth_engine),
             ("MULTIBAGGER", _trigger_multibagger),
         ]
@@ -2581,9 +2582,9 @@ def _trigger_accumulation(trigger_type="MANUAL", scheduler_name="MANUAL", run_ct
     scanner = AccumulationScanner()
     return scanner.start(force=True, run_ctx=run_ctx, trigger_type=trigger_type, scheduler_name=scheduler_name)
 
-def _trigger_technical(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
+def _trigger_technical(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None, session=None):
     from technical_scanner import run_technical_scan
-    count = run_technical_scan(trigger_type=trigger_type, scheduler_name=scheduler_name, run_ctx=run_ctx)
+    count = run_technical_scan(trigger_type=trigger_type, scheduler_name=scheduler_name, run_ctx=run_ctx, session=session)
     return {"total_count": count, "processed_count": count}
 
 # [VERSION: TRIGGER_AI_WORKER_v1.1] Define _trigger_ai_worker
