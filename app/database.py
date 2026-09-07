@@ -3853,7 +3853,7 @@ def upsert_scanner_health(
                     if run_id is not None:
                         set_clauses.append("active_run_id = %s")
                         params.append(run_id)
-                    elif status in ('OK', 'DOWN', 'IDLE'):
+                    elif status in ('OK', 'DOWN', 'IDLE') or (status and str(status).startswith('QUEUED')):
                         set_clauses.append("active_run_id = NULL")
 
                     set_clauses.append("updated_at = %s")
@@ -3959,7 +3959,7 @@ def upsert_scanner_health(
 
 
 def get_all_scanner_health() -> list[dict]:
-    """Return all scanner health rows, auto-seeding any missing standard scanners so cards never disappear."""
+    """Return all scanner health rows, in-memory seeding any missing standard scanners so cards never disappear."""
     init_db()
     schedule_map = {
         "DAILY_BUILDER": "Daily 05:00 IST",
@@ -3980,31 +3980,6 @@ def get_all_scanner_health() -> list[dict]:
         "Pledge Worker": "Continuous (Daily Refresh)",
         "AI Worker": "Continuous (Sat-Sun Active)",
     }
-
-    # [RULE 67 CHANGE-RATIONALE]:
-    # Throttle auto-seed write operations to once every 60 seconds.
-    # Previously, running 13 INSERT/UPDATE queries on every single read GET request created
-    # heavy database write contention and added 200-500ms delay to every 10s UI poll.
-    global _HEALTH_SEED_LAST_RUN_TS
-    if '_HEALTH_SEED_LAST_RUN_TS' not in globals():
-        _HEALTH_SEED_LAST_RUN_TS = 0.0
-
-    _now_mono_h = time.monotonic()
-    if (_now_mono_h - _HEALTH_SEED_LAST_RUN_TS) >= 60.0:
-        _HEALTH_SEED_LAST_RUN_TS = _now_mono_h
-        try:
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    now_str = datetime.now(IST).isoformat()
-                    for sc_name, sched_str in schedule_map.items():
-                        cur.execute("""
-                            INSERT INTO scanner_health (scanner_name, status, scheduled_for, updated_at)
-                            VALUES (%s, 'IDLE', %s, %s)
-                            ON CONFLICT (scanner_name) DO UPDATE SET scheduled_for = EXCLUDED.scheduled_for
-                        """, (sc_name, sched_str, now_str))
-                    conn.commit()
-        except Exception as seed_err:
-            logger.warning(f"Scanner health schedule sync warning: {seed_err}")
 
     # Watchdog Auto-Healing: Only mark stuck RUNNING threads as DOWN if global scanner lock is NOT held AND no fresh heartbeat exists
     try:
@@ -4096,10 +4071,11 @@ def reset_all_scanners_on_boot() -> None:
                 cur.execute("""
                     UPDATE scanner_health
                     SET status = 'OK',
+                        active_run_id = NULL,
                         error_msg = NULL,
                         is_acknowledged = TRUE,
                         updated_at = NOW()
-                    WHERE status IN ('DOWN', 'RUNNING') OR status LIKE 'QUEUED%';
+                    WHERE status IN ('DOWN', 'RUNNING') OR status LIKE 'QUEUED%' OR active_run_id IS NOT NULL;
                 """)
                 now_str = datetime.now(IST).isoformat()
                 schedule_map = {
@@ -9702,18 +9678,7 @@ def cleanup_orphaned_scanner_runs_on_boot(cur=None):
         except Exception as e:
             logger.warning(f"Failed to reset scanner_execution_history on boot: {e}")
 
-        try:
-            c.execute("""
-                UPDATE scanner_health
-                SET status = 'IDLE',
-                    error_msg = 'Server restarted — health status reset to IDLE',
-                    updated_at = NOW()
-                WHERE UPPER(status) IN ('RUNNING', 'QUEUED', 'STOPPED', 'PAUSED') OR UPPER(status) LIKE 'QUEUED%';
-            """)
-            return c.rowcount
-        except Exception as e:
-            logger.warning(f"Failed to reset scanner_health on boot: {e}")
-            return 0
+        return 0
 
     try:
         if cur is not None:
