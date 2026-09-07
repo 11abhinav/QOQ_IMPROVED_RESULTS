@@ -294,6 +294,10 @@ def get_active_armed_candidates() -> List[Dict[str, Any]]:
     """
     Returns all active, non-invalidated, non-executed candidates from mtf_v2_watchlist
     for lightweight 5-minute monitoring.
+    [RULE 67 CHANGE-RATIONALE: ARMED_SUBSTATE_FILTER_v2.0]
+    Strictly filters to active urgency substates (PRESSURE_BUILDING, ARMED_PRE_BREAKOUT, ATTEMPT)
+    updated within the last 5 days. Excludes passive WATCHING formations to prevent inflating
+    5m monitor and Tier 2 lazy-fetch cycles from ~30 candidates to 200+ historical rows.
     """
     try:
         with get_connection() as conn:
@@ -301,9 +305,10 @@ def get_active_armed_candidates() -> List[Dict[str, Any]]:
                 cur.execute("""
                     SELECT *
                     FROM mtf_v2_watchlist
-                    WHERE mtf_substate IN ('WATCHING', 'PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT')
+                    WHERE mtf_substate IN ('PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT')
                       AND (cooldown_until IS NULL OR cooldown_until <= NOW())
                       AND invalidated_at IS NULL
+                      AND updated_at >= NOW() - INTERVAL '5 days'
                     ORDER BY updated_at DESC;
                 """)
                 rows = cur.fetchall()
@@ -318,7 +323,7 @@ def get_armed_candidate_lifecycle_summary() -> Dict[str, Any]:
     Returns an institutional lifecycle breakdown of all candidates in mtf_v2_watchlist.
     Validates overnight survival and tracking:
     - total_in_watchlist
-    - active_substates (WATCHING, PRESSURE_BUILDING, ARMED_PRE_BREAKOUT, ATTEMPT)
+    - active_substates (PRESSURE_BUILDING, ARMED_PRE_BREAKOUT, ATTEMPT)
     - in_cooldown
     - invalidated
     - live_monitor_eligible
@@ -329,12 +334,13 @@ def get_armed_candidate_lifecycle_summary() -> Dict[str, Any]:
                 cur.execute("""
                     SELECT 
                         COUNT(*) as total_count,
-                        COUNT(*) FILTER (WHERE mtf_substate IN ('WATCHING', 'PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT') AND invalidated_at IS NULL) as active_substates,
+                        COUNT(*) FILTER (WHERE mtf_substate IN ('PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT') AND invalidated_at IS NULL AND updated_at >= NOW() - INTERVAL '5 days') as active_substates,
                         COUNT(*) FILTER (WHERE cooldown_until IS NOT NULL AND cooldown_until > NOW() AND invalidated_at IS NULL) as in_cooldown,
-                        COUNT(*) FILTER (WHERE invalidated_at IS NOT NULL) as invalidated,
-                        COUNT(*) FILTER (WHERE mtf_substate IN ('WATCHING', 'PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT')
+                        COUNT(*) FILTER (WHERE invalidated_at IS NOT NULL OR updated_at < NOW() - INTERVAL '5 days') as invalidated,
+                        COUNT(*) FILTER (WHERE mtf_substate IN ('PRESSURE_BUILDING', 'ARMED_PRE_BREAKOUT', 'ATTEMPT')
                                            AND (cooldown_until IS NULL OR cooldown_until <= NOW())
-                                           AND invalidated_at IS NULL) as live_eligible
+                                           AND invalidated_at IS NULL
+                                           AND updated_at >= NOW() - INTERVAL '5 days') as live_eligible
                     FROM mtf_v2_watchlist;
                 """)
                 row = cur.fetchone()
