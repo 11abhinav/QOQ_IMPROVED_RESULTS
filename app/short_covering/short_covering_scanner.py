@@ -67,9 +67,14 @@ class ShortCoveringEarlyIgnitionScanner:
     def check_watchlist_freshness(self, target_date: date) -> Tuple[bool, Optional[date], date]:
         """
         Verifies that short_covering_watchlist has candidates from the latest valid trading session.
+        For intraday trading on a market day, the candidate watchlist was created by the previous
+        session's EOD scan (e.g. Friday for Monday, or Monday for Tuesday).
         Returns (is_fresh, latest_watchlist_date, expected_trading_date).
         """
-        expected_date = target_date if is_trading_day(target_date) else get_latest_trading_date(target_date)
+        # RULE 67 RATIONALE: During active market hours on a trading day (e.g. Mon 09:20),
+        # the candidates being traded were produced by Friday's (previous session) EOD scan.
+        # If today is a non-trading day (weekend/holiday), the expected session is the latest completed session.
+        expected_date = get_previous_trading_date(target_date) if is_trading_day(target_date) else get_latest_trading_date(target_date)
         if not os.getenv("DATABASE_URL") or os.getenv("DISABLE_DB_OI_LOOKUP"):
             return True, expected_date, expected_date
         try:
@@ -83,8 +88,8 @@ class ShortCoveringEarlyIgnitionScanner:
                     max_date = row[0] if row and row[0] else None
                     if max_date is None:
                         return False, None, expected_date
-                    # Consider fresh if within 1 trading day
-                    is_fresh = (max_date >= expected_date) or (get_latest_trading_date(expected_date) <= max_date)
+                    # Consider fresh if max_date matches or exceeds the expected session date
+                    is_fresh = max_date >= expected_date
                     return is_fresh, max_date, expected_date
         except Exception as e:
             logger.debug("Failed to check watchlist freshness: %s", e)
@@ -126,7 +131,7 @@ class ShortCoveringEarlyIgnitionScanner:
                 upsert_scanner_health(
                     scanner_name="SHORT_COVERING_5M",
                     status="OK",
-                    outcome="SKIPPED",
+                    outcome="STALE_WATCHLIST",
                     error_msg=f"STALE_WATCHLIST (Latest: {max_date}, Expected: {expected_date})",
                     duration_seconds=round(time.monotonic() - start_t, 2),
                     scheduled_for=_SCHEDULE_STR
@@ -475,10 +480,13 @@ class ShortCoveringEarlyIgnitionScanner:
                     if hasattr(conn, "is_dummy") and conn.is_dummy:
                         return []
                     with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT * FROM short_covering_watchlist WHERE scan_date <= %s ORDER BY buildup_quality_score DESC LIMIT 40",
-                            (target_date,)
-                        )
+                        # RULE 67 RATIONALE: Only select candidates matching the most recent session on/before target_date
+                        # to ensure stale entries from older sessions are never intermingled.
+                        cur.execute("""
+                            SELECT * FROM short_covering_watchlist 
+                            WHERE scan_date = (SELECT MAX(scan_date) FROM short_covering_watchlist WHERE scan_date <= %s)
+                            ORDER BY buildup_quality_score DESC LIMIT 40;
+                        """, (target_date,))
                         rows = cur.fetchall()
                         for r in rows:
                             candidates.append(EODShortPositionCandidate(
@@ -500,7 +508,9 @@ class ShortCoveringEarlyIgnitionScanner:
                                 reasons=["Loaded from Layer 1 EOD watchlist"]
                             ))
             except Exception as e:
-                logger.debug(f"Could not load EOD watchlist from DB: {e}")
+                logger.error(f"Could not load EOD watchlist from DB: {e}")
+                if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
+                    raise
         return candidates
 
     def _persist_alerts(self, alerts: List[ShortCoveringSignal]) -> None:
@@ -552,7 +562,11 @@ class ShortCoveringEarlyIgnitionScanner:
                         conn.commit()
             logger.info(f"💾 Persisted {len(alerts)} alerts to short_covering_alerts table")
         except Exception as e:
-            logger.debug(f"Could not persist alerts to DB: {e}")
+            # RULE 67 RATIONALE: Re-raise DB persistence error when database is configured so that
+            # scanner_health accurately reflects FAILURE / DOWN status rather than fake success.
+            logger.error(f"❌ Could not persist alerts to DB: {e}")
+            if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
+                raise
 
 
 # Global singleton instance

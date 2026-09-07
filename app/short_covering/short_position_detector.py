@@ -340,7 +340,11 @@ class ShortPositionDetector:
                         conn.commit()
             logger.info(f"💾 Persisted {len(candidates)} candidates to short_covering_watchlist table")
         except Exception as e:
-            logger.debug(f"Database save for short_covering_watchlist skipped: {e}")
+            # RULE 67 RATIONALE: Re-raise DB write failure when database is configured so that
+            # scanner_health records DOWN / FAILURE instead of a misleading healthy/success state.
+            logger.error(f"❌ Database save for short_covering_watchlist failed: {e}")
+            if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
+                raise
 
 
 
