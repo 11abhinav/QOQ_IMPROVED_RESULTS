@@ -2290,7 +2290,10 @@ def run_watchdog():
                     del active_threads[name]
 
                 elif name in ONE_SHOT_THREADS:
-                    # EOD/Reversal crashed without completing cleanly — already sent
+                    # RULE 67 RATIONALE: EOD/Reversal/One-shot threads crash alerts are handled internally by their runners.
+                    # Drop them from active_threads without attempting auto-restart.
+                    logger.warning(f"⚠️ ONE-SHOT THREAD EXITED UNCLEANLY: {name} — NOT restarting (Telegram already notified).")
+                    del active_threads[name]
                 else:
                     # Restartable scanner crashed — revive it
                     logger.critical(f"💀 THREAD CRASH: {name} — restarting in 10s...")
