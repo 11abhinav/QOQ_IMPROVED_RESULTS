@@ -7612,12 +7612,14 @@ def get_mtf_target_universe() -> 'pd.DataFrame':
 def get_multitf_universe() -> list:
     """
     Returns the comprehensive deduplicated universe of symbols for the Multi-TF scanner.
+    Excludes Daily Builder watchlist (daily_watchlist_v2) per user directive.
     Combines:
-      1. Daily fundamental watchlist (daily_watchlist_v2)
-      2. Manual watchlists of users and admin (user_watchlists)
+      1. Manual watchlists of all users and admin (user_watchlists)
+      2. Manual portfolio holdings of all users (manual_portfolio)
       3. All historical & active system alerts (alerts)
-      4. Wealth / Multibagger alerts (wealth_buy_alert)
+      4. Wealth alerts (wealth_buy_alert)
       5. Breakout watchlist candidates (breakout_watchlist)
+      6. Accumulation alerts (accumulation_alerts)
     """
     init_db()
     symbols = set()
@@ -7625,17 +7627,7 @@ def get_multitf_universe() -> list:
     try:
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # 1. Daily Watchlist V2
-                try:
-                    cur.execute("SELECT DISTINCT symbol FROM daily_watchlist_v2 WHERE symbol IS NOT NULL AND symbol != ''")
-                    dw_syms = {r[0].strip().upper() for r in cur.fetchall() if r[0]}
-                    counts["daily_watchlist"] = len(dw_syms)
-                    symbols.update(dw_syms)
-                except Exception as ex_dw:
-                    logger.warning(f"[MULTI_TF_UNIVERSE] Error querying daily_watchlist_v2: {ex_dw}")
-                    counts["daily_watchlist"] = 0
-
-                # 2. User & Admin Manual Watchlists
+                # 1. User & Admin Manual Watchlists
                 try:
                     cur.execute("SELECT DISTINCT symbol FROM user_watchlists WHERE symbol IS NOT NULL AND symbol != ''")
                     uw_syms = {r[0].strip().upper() for r in cur.fetchall() if r[0]}
@@ -7645,7 +7637,17 @@ def get_multitf_universe() -> list:
                     logger.warning(f"[MULTI_TF_UNIVERSE] Error querying user_watchlists: {ex_uw}")
                     counts["user_admin_watchlists"] = 0
 
-                # 3. System Alerts
+                # 2. Manual Portfolio Holdings
+                try:
+                    cur.execute("SELECT DISTINCT symbol FROM manual_portfolio WHERE symbol IS NOT NULL AND symbol != ''")
+                    mp_syms = {r[0].strip().upper() for r in cur.fetchall() if r[0]}
+                    counts["manual_portfolio"] = len(mp_syms)
+                    symbols.update(mp_syms)
+                except Exception as ex_mp:
+                    logger.warning(f"[MULTI_TF_UNIVERSE] Error querying manual_portfolio: {ex_mp}")
+                    counts["manual_portfolio"] = 0
+
+                # 3. System Alerts (All Scanners)
                 try:
                     cur.execute("SELECT DISTINCT symbol FROM alerts WHERE symbol IS NOT NULL AND symbol != ''")
                     al_syms = {r[0].strip().upper() for r in cur.fetchall() if r[0]}
@@ -7675,30 +7677,33 @@ def get_multitf_universe() -> list:
                     logger.warning(f"[MULTI_TF_UNIVERSE] Error querying breakout_watchlist: {ex_bw}")
                     counts["breakout_watchlist"] = 0
 
+                # 6. Accumulation Alerts
+                try:
+                    cur.execute("SELECT DISTINCT symbol FROM accumulation_alerts WHERE symbol IS NOT NULL AND symbol != ''")
+                    acc_syms = {r[0].strip().upper() for r in cur.fetchall() if r[0]}
+                    counts["accumulation_alerts"] = len(acc_syms)
+                    symbols.update(acc_syms)
+                except Exception as ex_acc:
+                    logger.warning(f"[MULTI_TF_UNIVERSE] Error querying accumulation_alerts: {ex_acc}")
+                    counts["accumulation_alerts"] = 0
+
         import config
         non_equity_blocklist = getattr(config, "NON_EQUITY_BLOCKLIST", set())
         final_symbols = [s for s in sorted(list(symbols)) if s.upper() not in non_equity_blocklist]
         if final_symbols:
             logger.info(
                 f"[MULTI_TF_UNIVERSE] Loaded {len(final_symbols)} distinct symbols "
-                f"(Daily WL: {counts.get('daily_watchlist', 0)}, "
-                f"User/Admin WL: {counts.get('user_admin_watchlists', 0)}, "
+                f"(User/Admin WL: {counts.get('user_admin_watchlists', 0)}, "
+                f"Manual Portfolio: {counts.get('manual_portfolio', 0)}, "
                 f"Alerts: {counts.get('alerts', 0)}, "
                 f"Wealth: {counts.get('wealth_alerts', 0)}, "
-                f"Breakout WL: {counts.get('breakout_watchlist', 0)})"
+                f"Breakout WL: {counts.get('breakout_watchlist', 0)}, "
+                f"Accumulation: {counts.get('accumulation_alerts', 0)})"
             )
             return final_symbols
     except Exception as e:
         logger.error(f"[MULTI_TF_UNIVERSE] DB connection error: {e}")
 
-    # Fallback to get_elite_watchlist()
-    fallback = get_elite_watchlist()
-    if fallback:
-        import config
-        non_equity_blocklist = getattr(config, "NON_EQUITY_BLOCKLIST", set())
-        fallback = [s for s in fallback if s.upper() not in non_equity_blocklist]
-        logger.warning(f"[MULTI_TF_UNIVERSE] Falling back to get_elite_watchlist() ({len(fallback)} symbols)")
-        return fallback
     return []
 
 
