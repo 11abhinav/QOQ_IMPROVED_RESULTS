@@ -1312,6 +1312,8 @@ def resolve_orphan_fundamental_data(symbol: str) -> dict | None:
     global _orphan_fundamental_cache, _orphan_cache_timestamp
     now_mono = time.monotonic()
     if now_mono - _orphan_cache_timestamp > 900 or not _orphan_fundamental_cache:
+        # [RULE 67 CHANGE-RATIONALE: VECTORIZED_ORPHAN_CACHE_v1.0]
+        # Fast vectorized dataframe dictionary conversion instead of slow row-by-row iterrows() loop
         merged_cache = {}
         for fname in ["temp_universe.parquet", "elite_universe_v2.parquet", "near_qualified_v2.parquet", "elite_fundamental_watchlist_excluded.csv"]:
             fpath = os.path.join(DATA_DIR, fname)
@@ -1323,10 +1325,14 @@ def resolve_orphan_fundamental_data(symbol: str) -> dict | None:
                         c_df = pd.read_csv(fpath)
                     sym_col = "Stock" if "Stock" in c_df.columns else ("Symbol" if "Symbol" in c_df.columns else None)
                     if sym_col and not c_df.empty:
-                        for _, r_data in c_df.iterrows():
-                            s_val = str(r_data[sym_col]).strip().upper()
+                        c_df = c_df.dropna(subset=[sym_col])
+                        c_df[sym_col] = c_df[sym_col].astype(str).str.strip().str.upper()
+                        c_df = c_df.drop_duplicates(subset=[sym_col])
+                        file_dict = c_df.set_index(sym_col).to_dict(orient="index")
+                        for s_val, r_dict in file_dict.items():
                             if s_val and s_val not in merged_cache:
-                                merged_cache[s_val] = r_data.to_dict()
+                                r_dict["Stock"] = s_val
+                                merged_cache[s_val] = r_dict
                 except Exception as _ce:
                     logger.debug(f"Could not read {fname} for orphan cache: {_ce}")
         _orphan_fundamental_cache = merged_cache
@@ -1340,11 +1346,11 @@ def resolve_orphan_fundamental_data(symbol: str) -> dict | None:
     # 2. Fallback to DB stock_analysis_master if not found in local parquets
     if not found_row_dict:
         try:
-            from database import fetch_deep_analysis_from_master
+            from database import get_stock_master_analysis
             for key in possible_keys:
-                master_res = fetch_deep_analysis_from_master(key)
+                master_res = get_stock_master_analysis(key)
                 if master_res and isinstance(master_res, dict):
-                    found_row_dict = master_res.get("raw_data") or master_res
+                    found_row_dict = master_res.get("deep_analysis_result") or master_res.get("raw_data") or master_res
                     break
         except Exception as _dbe:
             logger.debug(f"DB master lookup for orphan {symbol} failed: {_dbe}")
@@ -2903,12 +2909,17 @@ def run_wealth_intraday_update(is_test_mode=False, write_health=True):
                 logger.warning(f"Failed to fetch live prices for wealth intraday update: {e}")
         stage_tracker.end_stage(f"Fetched CMP for {len(realtime_metrics)} positions")
 
+        # [RULE 67 CHANGE-RATIONALE: O1_PORTFOLIO_LOOKUP_v1.0]
+        # Pre-index wealth_df into a dictionary for O(1) lookups instead of 50+ sequential DataFrame scans
+        wealth_stock_map = {}
+        if not wealth_df.empty and "Stock" in wealth_df.columns:
+            wealth_stock_map = {r["Stock"]: r for r in wealth_df.to_dict(orient="records")}
+
         stage_tracker.start_stage(3, "Exit Rule & Trailing Stop Loss Evaluation", "Evaluating exit triggers")
-        # Update position CMPs and check exit triggers
         portfolio_rows = []
         for sym, p_info in portfolio_dict.items():
-            if sym in wealth_df["Stock"].values:
-                row = wealth_df[wealth_df["Stock"] == sym].iloc[0].to_dict()
+            if sym in wealth_stock_map:
+                row = dict(wealth_stock_map[sym])
             else:
                 row = {"Stock": sym}
                 enriched = resolve_orphan_fundamental_data(sym)
