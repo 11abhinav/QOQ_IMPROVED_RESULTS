@@ -1082,6 +1082,11 @@ def _process_symbol(
         cand_dict = build_watchlist_candidate(bundle, consolidation, ctx_1h, ctx_30m, market_ctx, ist_now)
         try:
             persist_new_watchlist_candidate(cand_dict)
+            logger.info(
+                f"👁️ [MULTI_TF: CONSOLIDATION WATCH] {symbol} added to Watchlist (Setup Score: {consolidation.setup_score:.1f}/100) | "
+                f"CMP: ₹{current_price:.2f} | Box High: ₹{consolidation.box_high:.2f} | Box Low: ₹{consolidation.box_low:.2f} | "
+                f"Width: {consolidation.box_width_pct:.1f}% — (Pending 5M breakout trigger, not an active trade yet)"
+            )
         except Exception as _p_err:
             logger.error("[MULTI_TF] Failed persisting candidate for %s: %s", symbol, _p_err)
             if funnel_counters is not None:
@@ -1222,9 +1227,16 @@ def _process_symbol(
 
             # Gate 1: 5M Close above resistance + buffer
             if c_5m < (res_line + buffer_atr):
+                dist_res = ((res_line + buffer_atr - c_5m) / res_line * 100.0) if res_line > 0 else 0.0
                 if funnel_counters is not None:
                     funnel_counters["BREAKOUT_CLOSE_FAIL"] += 1
-                logger.info("🚫 [MULTI_TF] %s REJECTED — 5M Close (%.2f) failed to clear resistance buffer (%.2f)", symbol, c_5m, res_line + buffer_atr)
+                logger.info("🚫 [MULTI_TF] %s REJECTED — 5M Close (₹%.2f) failed to clear resistance buffer (₹%.2f [dist: -%.1f%%]) | RVOL: %.2fx", symbol, c_5m, res_line + buffer_atr, dist_res, pressure.volume_ratio)
+                if c_5m >= res_line:
+                    try:
+                        from near_miss_tracker import log_near_miss
+                        log_near_miss(symbol, "MULTI_TF", "5M_BREAKOUT", "resistance_buffer_clearance", c_5m, res_line + buffer_atr, entry_price=c_5m, stop_loss=consolidation.box_low)
+                    except Exception:
+                        pass
                 update_state_in_db(state_record, _live_data_updates())
                 return
 
@@ -1233,7 +1245,12 @@ def _process_symbol(
             if pressure.volume_ratio < min_rvol and pressure.trigger_model != "MODEL_B_RETEST":
                 if funnel_counters is not None:
                     funnel_counters["BREAKOUT_RVOL_FAIL"] += 1
-                logger.info("🚫 [MULTI_TF] %s REJECTED — 5M Volume ratio (%.2fx) below confirmation threshold (%.2fx)", symbol, pressure.volume_ratio, min_rvol)
+                logger.info("🚫 [MULTI_TF] %s REJECTED — 5M Volume ratio (%.2fx) below confirmation threshold (%.2fx) (CMP: ₹%.2f | Level: ₹%.2f)", symbol, pressure.volume_ratio, min_rvol, c_5m, res_line)
+                try:
+                    from near_miss_tracker import log_near_miss
+                    log_near_miss(symbol, "MULTI_TF", "5M_BREAKOUT", "insufficient_volume_surge", pressure.volume_ratio, min_rvol, score=int(confluence.total_score if 'confluence' in locals() else 0), entry_price=c_5m, stop_loss=consolidation.box_low)
+                except Exception:
+                    pass
                 update_state_in_db(state_record, _live_data_updates())
                 return
 
@@ -1241,7 +1258,7 @@ def _process_symbol(
             if pressure.is_overextended:
                 if funnel_counters is not None:
                     funnel_counters["BREAKOUT_EXHAUSTION"] += 1
-                logger.info("🚫 [MULTI_TF] %s REJECTED — Breakout candle overextended or abnormal velocity blow-off", symbol)
+                logger.info("🚫 [MULTI_TF] %s REJECTED — Breakout candle overextended or abnormal velocity blow-off (CMP: ₹%.2f | Level: ₹%.2f)", symbol, c_5m, res_line)
                 update_state_in_db(state_record, _live_data_updates())
                 return
 
@@ -1249,7 +1266,12 @@ def _process_symbol(
             if not confluence.is_approved:
                 if funnel_counters is not None:
                     funnel_counters["LOW_CONFLUENCE"] += 1
-                logger.info("🚫 [MULTI_TF] %s REJECTED — Confluence not approved (Score: %.1f)", symbol, confluence.total_score)
+                logger.info("🚫 [MULTI_TF] %s REJECTED — Confluence not approved (Score: %.1f | CMP: ₹%.2f | Level: ₹%.2f | RVOL: %.2fx)", symbol, confluence.total_score, c_5m, res_line, pressure.volume_ratio)
+                try:
+                    from near_miss_tracker import log_near_miss
+                    log_near_miss(symbol, "MULTI_TF", "5M_BREAKOUT", "confluence_score_below_threshold", confluence.total_score, 70.0, score=int(confluence.total_score), entry_price=c_5m, stop_loss=consolidation.box_low)
+                except Exception:
+                    pass
                 update_state_in_db(state_record, _live_data_updates())
                 return
 

@@ -2210,7 +2210,21 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
                         if not verdict["passed"]:
                             rej_code = verdict.get("reject_code", "failed_pattern")
                             rej_msg = verdict.get("reject_reason", rej_code)
-                            logger.info(f"🚫 [REVERSAL] {symbol} REJECTED — Gate: {rej_code.upper()} | Reason: {rej_msg}")
+                            close_px = float(ticker["Close"].iloc[-1]) if not ticker.empty else 0.0
+                            rsi_px = float(ticker["RSI"].iloc[-1]) if ("RSI" in ticker.columns and not ticker.empty and not pd.isna(ticker["RSI"].iloc[-1])) else 50.0
+                            vol_ratio_px = float(ticker["Volume_Ratio"].iloc[-1]) if ("Volume_Ratio" in ticker.columns and not ticker.empty and not pd.isna(ticker["Volume_Ratio"].iloc[-1])) else 1.0
+                            ev_score = float(verdict.get("score") or verdict.get("raw_score") or 0.0)
+                            sl_res_tmp = verdict.get("sl_result", {})
+                            sl_px_tmp = float(sl_res_tmp.get("stop_loss", 0.0)) if sl_res_tmp.get("stop_loss") else round(close_px * 0.95, 2)
+
+                            if ev_score >= 60.0 and close_px > 0:
+                                logger.info(
+                                    f"👁️ [REVERSAL: SETUP WATCH] {symbol} added to Watchlist (Reversal Score: {ev_score:.1f}/100) | "
+                                    f"CMP: ₹{close_px:.2f} | RSI: {rsi_px:.1f} | RVOL: {vol_ratio_px:.2f}x | "
+                                    f"SL: ₹{sl_px_tmp:.2f} — (Pending reversal trigger)"
+                                )
+
+                            logger.info(f"🚫 [REVERSAL] {symbol} REJECTED — Gate: {rej_code.upper()} | Reason: {rej_msg} (CMP: ₹{close_px:.2f} | RSI: {rsi_px:.1f} | RVOL: {vol_ratio_px:.2f}x | Score: {ev_score:.1f})")
                             with _batch_lock:
                                 rejected[rej_code] += 1
                                 terminal_tracker.record_terminal(symbol, rej_code.upper(), rej_msg)

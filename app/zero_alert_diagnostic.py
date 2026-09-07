@@ -121,18 +121,49 @@ class SingleTerminalTracker:
         return untracked
 
     def get_summary(self) -> Dict[str, Any]:
-        """Returns conservation accounting summary."""
+        """
+        Returns conservation accounting summary enforcing:
+        Input == Passed + Rejected + Skipped + Error (Delta == 0).
+        """
         with self._lock:
             sum_terminal = sum(self._counts.values())
             delta = self.total_universe - sum_terminal
             untracked = self._counts.get("UNTRACKED_DROP", 0)
+
+            passed_count = 0
+            skipped_count = 0
+            error_count = 0
+            rejected_count = 0
+
+            for gate, count in self._counts.items():
+                if gate == "UNTRACKED_DROP":
+                    continue
+                g_upper = gate.upper()
+                if g_upper in ("ALERT_GENERATED", "PASSED", "SELECTED", "ALERT_TRIGGERED"):
+                    passed_count += count
+                elif any(w in g_upper for w in ("SKIP", "DUPLICATE", "ALREADY_ALERTED", "ALREADY_OPEN", "COOLDOWN", "SUPPRESSED", "ADMIN_STOP")):
+                    skipped_count += count
+                elif any(w in g_upper for w in ("ERROR", "FAIL", "EXCEPTION", "OUTAGE", "PIPELINE_FAILED", "INSERT_FAILED")):
+                    if any(w in g_upper for w in ("QUALITY_GATE", "FUNDAMENTAL_FAIL", "SCORE_FAIL", "ENTRY_CONFIRM_FAILED", "LIVE_ENTRY_FAILED", "ATR_FAIL", "SUPPORT_FAIL", "VOLUME_FAIL", "LIQUIDITY_FAIL", "STRUCTURE_FAIL")):
+                        rejected_count += count
+                    else:
+                        error_count += count
+                else:
+                    rejected_count += count
+
+            reconciled = (self.total_universe == (passed_count + rejected_count + skipped_count + error_count + untracked))
+
             return {
                 "total_universe": self.total_universe,
                 "terminal_counts": dict(sorted(self._counts.items(), key=lambda x: x[1], reverse=True)),
                 "sum_terminal": sum_terminal,
                 "conservation_delta": delta,
                 "untracked_drop": untracked,
-                "is_conserved": (delta == 0 and untracked == 0),
+                "passed_count": passed_count,
+                "rejected_count": rejected_count,
+                "skipped_count": skipped_count,
+                "error_count": error_count,
+                "is_conserved": (delta == 0 and untracked == 0 and reconciled),
                 "recorded_symbols_count": len(self._dispositions)
             }
 

@@ -47,6 +47,12 @@ from opportunity_manager import OpportunityManager
 from watchlist_cache import get_watchlist
 from price_cache import fetch_watchlist_data
 from macro_utils import get_nifty_20d_return
+from zero_alert_diagnostic import (
+    SingleTerminalTracker,
+    StageWaterfallTracker,
+    classify_zero_alert_run,
+    format_zero_alert_diagnostic_block
+)
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -145,10 +151,25 @@ class AccumulationScanner:
             "base_height": float(high.iloc[-20:].max() - low.iloc[-20:].min()) if len(high) >= 20 else atr14 * 4
         }
 
-    def evaluate_fundamental_floor(self, fund_data: Optional[Dict[str, Any]]) -> Tuple[float, bool, List[str]]:
-        """Evaluates lightweight fundamental quality floor."""
-        if not fund_data:
-            return 5.0, True, ["No fundamental data provided — using default floor pass"]
+    def evaluate_fundamental_floor(self, fund_data: Optional[Dict[str, Any]]) -> Tuple[float, bool, str, List[str]]:
+        """
+        [RULE 67 CHANGE-RATIONALE: PHASE_2_EVIDENCE_AWARE_DATA_CONTRACT_V1.0]
+        Evaluates lightweight fundamental quality floor with explicit evidence classification:
+        - FULL_CONFIDENCE: Complete & valid fundamentals provided (0-10 fund score + 0-90 tech = 0-100 total).
+        - REDUCED_CONFIDENCE: Missing or incomplete fundamentals. No artificial 5.0 score awarded.
+          Technical score stays on native 0-90 scale and marked TECHNICAL_ONLY.
+        - INSUFFICIENT_EVIDENCE: Required inputs unusable.
+        """
+        if not fund_data or not isinstance(fund_data, dict):
+            return 0.0, True, "REDUCED_CONFIDENCE", ["Fundamental data unavailable — evaluating technicals on native 0-90 scale"]
+
+        req_keys = ["ROE", "ROCE", "DebtEquity", "SalesGrowth", "PATGrowth"]
+        missing_keys = [
+            k for k in req_keys
+            if k not in fund_data or fund_data.get(k) is None or math.isnan(_safe_float(fund_data.get(k), float('nan')))
+        ]
+        if missing_keys:
+            return 0.0, True, "REDUCED_CONFIDENCE", [f"Incomplete fundamental dataset (missing {', '.join(missing_keys)}) — technical-only evaluation on native 0-90 scale"]
 
         roe = _safe_float(fund_data.get("ROE"))
         roce = _safe_float(fund_data.get("ROCE"))
@@ -177,7 +198,7 @@ class AccumulationScanner:
 
         score = max(0.0, score)
         passed = (score >= 4.0)
-        return score, passed, reasons
+        return score, passed, "FULL_CONFIDENCE", reasons
 
     def evaluate_symbol(
         self,
@@ -187,13 +208,24 @@ class AccumulationScanner:
         nifty_20d_ret: float = 0.0,
         run_id: str = "default_run"
     ) -> Dict[str, Any]:
-        """Evaluates single symbol against accumulation rules and SL/Target engine."""
+        """
+        [RULE 67 CHANGE-RATIONALE: PHASE_2_EVIDENCE_AWARE_DATA_CONTRACT_V1.0]
+        Evaluates single symbol against accumulation rules and SL/Target engine with explicit evidence state.
+        Maintains separation between evidence_confidence, qualification_state, and numerical score.
+        """
         telemetry = AccumulationTelemetryContext(run_id=run_id, symbol=symbol)
 
         if df is None or df.empty or len(df) < 50:
             telemetry.finalize("REJECTED", "INSUFFICIENT_HISTORY")
             telemetry.persist()
-            return {"status": "NO", "reason": "INSUFFICIENT_HISTORY", "symbol": symbol}
+            return {
+                "status": "NO",
+                "reason": "INSUFFICIENT_HISTORY",
+                "reason_code": "DATA_MISSING",
+                "evidence_confidence": "INSUFFICIENT_EVIDENCE",
+                "qualification_state": "REJECTED",
+                "symbol": symbol
+            }
 
         last_bar = df.iloc[-1]
         telemetry.capture_raw_market(
@@ -209,15 +241,29 @@ class AccumulationScanner:
         tech = self.calculate_technical_features(df)
         telemetry.capture_indicators(tech)
 
-        # Fundamental Floor Evaluation
-        fund_score, fund_pass, fund_reasons = self.evaluate_fundamental_floor(fund_data)
+        # Fundamental Floor Evaluation with Evidence Classification
+        fund_score, fund_pass, evidence_confidence, fund_reasons = self.evaluate_fundamental_floor(fund_data)
         telemetry.capture_fundamentals(fund_data or {})
-        telemetry.capture_gate("FundamentalFloor", fund_pass, actual_val=fund_score, operator_str=">=", threshold_val=4.0, reason="; ".join(fund_reasons))
+        telemetry.capture_gate(
+            "FundamentalFloor",
+            fund_pass,
+            actual_val=fund_score if evidence_confidence == "FULL_CONFIDENCE" else None,
+            operator_str=">=" if evidence_confidence == "FULL_CONFIDENCE" else "EVIDENCE",
+            threshold_val=4.0 if evidence_confidence == "FULL_CONFIDENCE" else evidence_confidence,
+            reason="; ".join(fund_reasons)
+        )
 
         if not fund_pass:
             telemetry.finalize("REJECTED", "FUNDAMENTAL_FLOOR_FAILED")
             telemetry.persist()
-            return {"status": "NO", "reason": "FUNDAMENTAL_FLOOR_FAILED", "symbol": symbol}
+            return {
+                "status": "NO",
+                "reason": "FUNDAMENTAL_FLOOR_FAILED",
+                "reason_code": "FUNDAMENTAL_FAIL",
+                "evidence_confidence": evidence_confidence,
+                "qualification_state": "REJECTED",
+                "symbol": symbol
+            }
 
         # Sub-score calculations (0–100 scaled to weights)
         cmp = tech["cmp"]
@@ -225,17 +271,17 @@ class AccumulationScanner:
         # 1. Accumulation Score (30 pts)
         obv_score = min(15.0, max(0.0, tech["obv_slope"] * 30.0))
         vol_acc_score = min(15.0, max(0.0, (tech["vol_ratio"] - 1.0) * 15.0)) if tech["vol_ratio"] > 1.0 else 5.0
-        acc_score = min(30.0, obv_score + vol_acc_score)
+        acc_score = round(min(30.0, obv_score + vol_acc_score), 1)
 
         # 2. Volatility Compression Score (20 pts)
         bb_comp_score = min(10.0, max(0.0, (0.10 - tech["bb_width"]) * 100.0)) if tech["bb_width"] < 0.10 else 2.0
         range_comp_score = min(10.0, max(0.0, (0.15 - tech["range_20"]) * 66.0)) if tech["range_20"] < 0.15 else 2.0
-        comp_score = min(20.0, bb_comp_score + range_comp_score)
+        comp_score = round(min(20.0, bb_comp_score + range_comp_score), 1)
 
         # 3. Relative Strength Score (15 pts)
         stock_20d_ret = ((cmp - float(df["Close"].iloc[-20])) / float(df["Close"].iloc[-20])) * 100.0 if len(df) >= 20 else 0.0
         rs_diff = stock_20d_ret - nifty_20d_ret
-        rs_score = min(15.0, max(0.0, 7.5 + (rs_diff * 0.75)))
+        rs_score = round(min(15.0, max(0.0, 7.5 + (rs_diff * 0.75))), 1)
         telemetry.capture_relative_strength({"stock_20d_ret": stock_20d_ret, "nifty_20d_ret": nifty_20d_ret, "rs_diff": rs_diff})
 
         # 4. Resistance Proximity Score (15 pts)
@@ -248,13 +294,53 @@ class AccumulationScanner:
             res_score = max(0.0, 15.0 - (dist_res - 8.0) * 2.5)
         else:
             res_score = 0.0
+        res_score = round(res_score, 1)
         telemetry.capture_resistance({"nearest_resistance": tech["nearest_resistance"], "distance_pct": dist_res})
 
         # 5. Volume/Delivery Structure (10 pts)
-        vol_struct_score = min(10.0, max(0.0, tech["vol_ratio"] * 5.0))
+        vol_struct_score = round(min(10.0, max(0.0, tech["vol_ratio"] * 5.0)), 1)
 
-        # Total Composite Score
-        total_score = round(acc_score + comp_score + rs_score + res_score + vol_struct_score + fund_score, 1)
+        raw_tech_score = round(acc_score + comp_score + rs_score + res_score + vol_struct_score, 1)
+
+        # Total Composite Score & Qualification State Assignment
+        if evidence_confidence == "FULL_CONFIDENCE":
+            total_score = round(raw_tech_score + fund_score, 1)
+            fund_score_rep = round(fund_score, 1)
+            
+            # State classification for Full Confidence
+            if total_score >= STATE_THRESHOLDS["BREAKOUT_READY"]:
+                state = "BREAKOUT_READY"
+                qualification_state = "ACTIONABLE"
+                reason_code = "QUALIFIED_ACTIONABLE"
+            elif total_score >= STATE_THRESHOLDS["PRE_BREAKOUT"]:
+                state = "PRE_BREAKOUT"
+                qualification_state = "WATCHLIST_ONLY"
+                reason_code = "QUALIFIED_PRE_BREAKOUT"
+            elif total_score >= STATE_THRESHOLDS["ACCUMULATION_WATCH"]:
+                state = "ACCUMULATION_WATCH"
+                qualification_state = "WATCHLIST_ONLY"
+                reason_code = "QUALIFIED_ACCUMULATION_WATCH"
+            else:
+                state = "NONE"
+                qualification_state = "REJECTED"
+                reason_code = "SCORE_FAIL"
+        else:
+            # REDUCED_CONFIDENCE: Technical score remains on native 0-90 scale
+            total_score = raw_tech_score
+            fund_score_rep = None
+            qualification_state = "TECHNICAL_ONLY"
+
+            # State classification on native 0-90 scale (cannot become ACTIONABLE live trade alert)
+            if total_score >= STATE_THRESHOLDS["PRE_BREAKOUT"]:
+                state = "PRE_BREAKOUT"
+                reason_code = "QUALIFIED_TECHNICAL_ONLY"
+            elif total_score >= STATE_THRESHOLDS["ACCUMULATION_WATCH"]:
+                state = "ACCUMULATION_WATCH"
+                reason_code = "QUALIFIED_TECHNICAL_ONLY"
+            else:
+                state = "NONE"
+                qualification_state = "REJECTED"
+                reason_code = "SCORE_FAIL"
 
         scores_map = {
             "ACCUMULATION": round(acc_score, 1),
@@ -262,24 +348,24 @@ class AccumulationScanner:
             "RELATIVE_STRENGTH": round(rs_score, 1),
             "RESISTANCE": round(res_score, 1),
             "VOLUME_STRUCTURE": round(vol_struct_score, 1),
-            "FUNDAMENTAL": round(fund_score, 1),
+            "FUNDAMENTAL": fund_score_rep,
             "TOTAL": total_score
         }
         telemetry.capture_scores(scores_map)
 
-        # State Classification
-        state = "NONE"
-        if total_score >= STATE_THRESHOLDS["BREAKOUT_READY"]:
-            state = "BREAKOUT_READY"
-        elif total_score >= STATE_THRESHOLDS["PRE_BREAKOUT"]:
-            state = "PRE_BREAKOUT"
-        elif total_score >= STATE_THRESHOLDS["ACCUMULATION_WATCH"]:
-            state = "ACCUMULATION_WATCH"
-
         if state == "NONE":
             telemetry.finalize("REJECTED", f"Score {total_score:.1f} < {STATE_THRESHOLDS['ACCUMULATION_WATCH']} threshold")
             telemetry.persist()
-            return {"status": "NO", "reason": "SCORE_BELOW_THRESHOLD", "score": total_score, "symbol": symbol}
+            return {
+                "status": "NO",
+                "reason": "SCORE_BELOW_THRESHOLD",
+                "reason_code": "SCORE_FAIL",
+                "score": total_score,
+                "evidence_confidence": evidence_confidence,
+                "qualification_state": "REJECTED",
+                "scores_breakdown": scores_map,
+                "symbol": symbol
+            }
 
         # Structural SL/Target Execution
         sl_tgt = compute_accumulation_sl_target(
@@ -299,7 +385,7 @@ class AccumulationScanner:
             val = tech.get(k.lower(), fund_data.get(k) if fund_data else 0.0)
             telemetry.add_decision_input(name=k, value=val, source="AccumulationEngine", valid=True)
 
-        telemetry.finalize("SELECTED", f"Qualified for {state} with score {total_score:.1f}")
+        telemetry.finalize("SELECTED", f"Qualified for {state} ({qualification_state}, {evidence_confidence}) with score {total_score:.1f}")
         telemetry.persist()
 
         return {
@@ -307,6 +393,9 @@ class AccumulationScanner:
             "symbol": symbol,
             "state": state,
             "score": total_score,
+            "evidence_confidence": evidence_confidence,
+            "qualification_state": qualification_state,
+            "reason_code": reason_code,
             "scores_breakdown": scores_map,
             "sl_target": sl_tgt,
             "audit_snapshot_id": telemetry.audit_snapshot_id,
@@ -411,6 +500,44 @@ class AccumulationScanner:
             # Load Macro Data (Nifty 20D Return)
             nifty_20d_ret = _safe_float(get_nifty_20d_return(), 0.0)
 
+            # [RULE 67 CHANGE-RATIONALE: PHASE_1_TELEMETRY_ACCUMULATION_V1.0]
+            # Purely observational SingleTerminalTracker & StageWaterfallTracker enforcing conservation invariant:
+            # Universe == sum(terminal_dispositions) with Delta == 0. Zero production gates or thresholds changed.
+            terminal_tracker = SingleTerminalTracker(symbols, scanner_name="ACCUMULATION")
+            terminal_tracker.map_gates_to_stage("2_DATA_FETCHED", [
+                "DATA_MISSING", "INSUFFICIENT_HISTORY", "NO_PRICE_DATA", "STALE_DATA"
+            ])
+            terminal_tracker.map_gates_to_stage("3_FUNDAMENTAL_FLOOR", [
+                "FUNDAMENTAL_FAIL", "FUNDAMENTAL_FLOOR_FAILED"
+            ])
+            terminal_tracker.map_gates_to_stage("4_TECHNICAL_SCORING", [
+                "SCORE_FAIL", "SCORE_BELOW_THRESHOLD"
+            ])
+            terminal_tracker.map_gates_to_stage("5_STATE_QUALIFIED", [
+                "WATCHLIST_ONLY", "PRE_BREAKOUT_WATCH", "ACCUMULATION_WATCH"
+            ])
+            terminal_tracker.map_gates_to_stage("6_FINAL_ALERTS", [
+                "ALREADY_ALERTED", "INSERT_FAILED", "ALERT_GENERATED"
+            ])
+
+            waterfall = StageWaterfallTracker([
+                "1_UNIVERSE",
+                "2_DATA_FETCHED",
+                "3_FUNDAMENTAL_FLOOR",
+                "4_TECHNICAL_SCORING",
+                "5_STATE_QUALIFIED",
+                "6_FINAL_ALERTS"
+            ])
+            waterfall.set_stage_count("1_UNIVERSE", len(symbols))
+
+            waterfall_counts = {
+                "data_fetched": 0,
+                "fund_floor_passed": 0,
+                "tech_scoring_passed": 0,
+                "state_breakout_ready": 0,
+                "near_misses": 0
+            }
+
             health.transition("ACCUMULATION_EVALUATION")
             candidates = []
             trade_alerts_count = 0
@@ -449,7 +576,8 @@ class AccumulationScanner:
 
                 for sym in batch:
                     df = ohlcv_map.get(sym)
-                    if isinstance(df, pd.DataFrame) and not df.empty:
+                    if isinstance(df, pd.DataFrame) and not df.empty and len(df) >= 50:
+                        waterfall_counts["data_fetched"] += 1
                         if getattr(df, "attrs", {}).get("is_stale"):
                             if run_ctx:
                                 run_ctx.mark_stale()
@@ -459,6 +587,7 @@ class AccumulationScanner:
                     else:
                         if run_ctx:
                             run_ctx.mark_incomplete()
+                        terminal_tracker.record_terminal(sym, "DATA_MISSING", "Insufficient price history or missing dataframe")
 
                     res = self.evaluate_symbol(
                         symbol=sym,
@@ -470,6 +599,8 @@ class AccumulationScanner:
 
                     health.record_metrics(processed_inc=1)
                     if res.get("status") == "QUALIFIED":
+                        waterfall_counts["fund_floor_passed"] += 1
+                        waterfall_counts["tech_scoring_passed"] += 1
                         health.record_metrics(valid_inc=1, candidates_inc=1)
                         candidates.append(res)
                         
@@ -478,15 +609,19 @@ class AccumulationScanner:
                         snapshot_id = res["audit_snapshot_id"]
                         score = res["score"]
                         
-                        # 1. Canonical Alert Registration (ONLY for BREAKOUT_READY setups to prevent premature OPEN trade positions)
+                        # 1. Canonical Alert Registration (ONLY for ACTIONABLE BREAKOUT_READY setups with FULL_CONFIDENCE)
                         inserted = False
-                        if state == "BREAKOUT_READY":
+                        qual_state = res.get("qualification_state", "REJECTED")
+                        evidence_conf = res.get("evidence_confidence", "REDUCED_CONFIDENCE")
+
+                        if state == "BREAKOUT_READY" and qual_state == "ACTIONABLE" and evidence_conf == "FULL_CONFIDENCE":
+                            waterfall_counts["state_breakout_ready"] += 1
                             logger.info(
                                 f"🚀 [ACCUMULATION: BREAKOUT TRIGGERED] {sym} triggered actionable breakout entry! "
                                 f"Score: {score:.1f}/100 | CMP: ₹{res['cmp']} | Trigger Entry: ₹{sl_tgt['breakout_level']} | "
                                 f"SL: ₹{sl_tgt['stop_loss']} | Target 1: ₹{sl_tgt['target_1']} (RR: {sl_tgt['rr_1']:.2f})"
                             )
-                            inserted, _, _, _ = save_alert_if_new(
+                            inserted, reason_msg, _, _ = save_alert_if_new(
                                 symbol=sym,
                                 breakout_type="ACCUMULATION",
                                 alert_time=datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
@@ -499,14 +634,26 @@ class AccumulationScanner:
                                 target_3=sl_tgt["target_3"],
                                 signals=state,
                                 score=int(score),
-                                context={"audit_snapshot_id": snapshot_id, "scores_breakdown": res["scores_breakdown"]},
+                                context={
+                                    "audit_snapshot_id": snapshot_id,
+                                    "scores_breakdown": res["scores_breakdown"],
+                                    "evidence_confidence": evidence_conf,
+                                    "qualification_state": qual_state
+                                },
                                 entry_mode="BREAKOUT_TRIGGER"
                             )
                             if inserted:
                                 trade_alerts_count += 1
+                                terminal_tracker.record_terminal(sym, "ALERT_GENERATED", f"Breakout ready alert generated @ ₹{res['cmp']}")
+                            else:
+                                if "duplicate" in str(reason_msg).lower():
+                                    terminal_tracker.record_terminal(sym, "ALREADY_ALERTED", str(reason_msg))
+                                else:
+                                    terminal_tracker.record_terminal(sym, "INSERT_FAILED", str(reason_msg))
                         else:
+                            terminal_tracker.record_terminal(sym, "WATCHLIST_ONLY", f"Tracking {state} ({qual_state}, {evidence_conf}, score {score:.1f})")
                             logger.info(
-                                f"👁️ [ACCUMULATION: {state.replace('_', ' ')}] {sym} added to Watchlist (Base Compression Score: {score:.1f}/100) | "
+                                f"👁️ [ACCUMULATION: {state.replace('_', ' ')}] {sym} added to Watchlist ({qual_state}, Base Score: {score:.1f}) | "
                                 f"CMP: ₹{res['cmp']} | Pending Breakout Level: ₹{sl_tgt['breakout_level']} | "
                                 f"SL: ₹{sl_tgt['stop_loss']} | RR: {sl_tgt['rr_1']:.2f} — (Pending breakout trigger, not an active trade yet)"
                             )
@@ -559,10 +706,10 @@ class AccumulationScanner:
                                         (
                                             run_id, snapshot_id, sym, state, sl_tgt.get("tradable", True),
                                              res["score"], res["scores_breakdown"]["ACCUMULATION"], res["scores_breakdown"]["COMPRESSION"], res["scores_breakdown"]["RELATIVE_STRENGTH"],
-                                            res["scores_breakdown"]["RESISTANCE"], res["scores_breakdown"]["VOLUME_STRUCTURE"], res["scores_breakdown"]["FUNDAMENTAL"],
-                                            res["cmp"], sl_tgt["entry_zone_low"], sl_tgt["entry_zone_high"], sl_tgt["breakout_level"], sl_tgt["stop_loss"],
-                                            sl_tgt["target_1"], sl_tgt["target_2"], sl_tgt["target_3"], sl_tgt["risk_pct"], sl_tgt["rr_1"], sl_tgt["rr_2"], sl_tgt["rr_3"],
-                                            sl_tgt["time_stop_days"], sl_tgt["invalidation_condition"]
+                                             res["scores_breakdown"]["RESISTANCE"], res["scores_breakdown"]["VOLUME_STRUCTURE"], res["scores_breakdown"]["FUNDAMENTAL"],
+                                             res["cmp"], sl_tgt["entry_zone_low"], sl_tgt["entry_zone_high"], sl_tgt["breakout_level"], sl_tgt["stop_loss"],
+                                             sl_tgt["target_1"], sl_tgt["target_2"], sl_tgt["target_3"], sl_tgt["risk_pct"], sl_tgt["rr_1"], sl_tgt["rr_2"], sl_tgt["rr_3"],
+                                             sl_tgt["time_stop_days"], sl_tgt["invalidation_condition"]
                                         )
                                     )
                                     conn.commit()
@@ -574,9 +721,18 @@ class AccumulationScanner:
                             logger.warning(f"Could not persist accumulation alert for {sym}: {al_err}")
                     else:
                         health.record_metrics(rejected_inc=1)
+                        rej_reason = res.get("reason", "UNKNOWN_REJECTION")
+                        if "FUNDAMENTAL" in rej_reason:
+                            terminal_tracker.record_terminal(sym, "FUNDAMENTAL_FAIL", rej_reason)
+                        elif "SCORE" in rej_reason:
+                            terminal_tracker.record_terminal(sym, "SCORE_FAIL", f"Score {res.get('score', 0.0):.1f} below threshold")
+                        else:
+                            terminal_tracker.record_terminal(sym, "SCORE_FAIL", rej_reason)
+
                         try:
                             sc_val = float(res.get("score", 0.0))
                             if sc_val >= 63.0:
+                                waterfall_counts["near_misses"] += 1
                                 from near_miss_tracker import log_near_miss
                                 sl_t = res.get("sl_target") or {}
                                 log_near_miss(
@@ -607,13 +763,60 @@ class AccumulationScanner:
                     f"0 actionable trade alerts opened (immediate trade execution requires BREAKOUT_READY score >= 85.0)."
                 )
 
+            # Enforce 100% Mathematical Conservation
+            terminal_tracker.record_untracked_remainder("UNTRACKED_DROP")
+            cons_summary = terminal_tracker.get_summary()
+
+            # Record final stage into waterfall
+            waterfall.set_stage_count("2_DATA_FETCHED", waterfall_counts["data_fetched"])
+            waterfall.set_stage_count("3_FUNDAMENTAL_FLOOR", waterfall_counts["fund_floor_passed"])
+            waterfall.set_stage_count("4_TECHNICAL_SCORING", waterfall_counts["tech_scoring_passed"])
+            waterfall.set_stage_count("5_STATE_QUALIFIED", waterfall_counts["state_breakout_ready"])
+            waterfall.set_stage_count("6_FINAL_ALERTS", trade_alerts_count)
+
+            attrition_results = waterfall.compute_attrition()
+            dominant_bottleneck = waterfall.get_dominant_bottleneck()
+
+            classification_res = classify_zero_alert_run(
+                scanner_name="ACCUMULATION",
+                universe_size=len(symbols),
+                valid_data_count=waterfall_counts["data_fetched"],
+                initial_setups_count=waterfall_counts["tech_scoring_passed"],
+                finalist_candidates_count=waterfall_counts["state_breakout_ready"],
+                alerts_generated=trade_alerts_count,
+                near_miss_count=waterfall_counts["near_misses"],
+                regime="NEUTRAL",
+                execution_mode="EOD_SCAN",
+                stage_waterfall=attrition_results
+            )
+
+            b_stg = dominant_bottleneck.get('stage', '') if dominant_bottleneck else ''
+            b_breakdown = terminal_tracker.get_stage_terminal_breakdown(b_stg) if b_stg else None
+
+            diag_block = format_zero_alert_diagnostic_block(
+                scanner_name="ACCUMULATION",
+                execution_mode="EOD_SCAN",
+                regime="NEUTRAL",
+                classification_result=classification_res,
+                dominant_bottleneck=dominant_bottleneck,
+                conservation_summary=cons_summary,
+                stage_waterfall=attrition_results,
+                near_miss_count=waterfall_counts["near_misses"],
+                extra_specs=[
+                    f"BREAKOUT_READY_THRESHOLD   : {STATE_THRESHOLDS.get('BREAKOUT_READY', 85.0)}",
+                    f"PRE_BREAKOUT_THRESHOLD     : {STATE_THRESHOLDS.get('PRE_BREAKOUT', 70.0)}",
+                    f"ACCUMULATION_WATCH_THRESH  : {STATE_THRESHOLDS.get('ACCUMULATION_WATCH', 55.0)}",
+                ],
+                bottleneck_terminal_breakdown=b_breakdown
+            )
+            for d_line in diag_block:
+                logger.info(d_line)
+
             health.transition("COMPLETED", status="OK" if health.status != "STOPPED" else "STOPPED")
             health.complete()
 
             dur_sec = round((datetime.now(IST) - start_time).total_seconds(), 2)
             now_str = datetime.now(IST).isoformat()
-            # [RULE 67 CHANGE-RATIONALE]: Explicitly record scheduled_for in scanner_health so
-            # the dashboard displays accurate execution timings.
             _ACC_SCHEDULE = "Daily 18:35 IST (Post-Bhavcopy / Verified Evening Batch)"
             upsert_scanner_health(
                 "ACCUMULATION",

@@ -969,6 +969,10 @@ def run_pullback_pipeline(run_date: str = None, force: bool = False, session=Non
                                 )
                             if cand:
                                 candidates.append(cand)
+                                logger.info(
+                                    f"👁️ [PULLBACK: SETUP WATCH] {cand.symbol} added to Watchlist | "
+                                    f"CMP: ₹{getattr(cand, 'entry_price', 0.0):.2f} | 20 EMA: ₹{getattr(cand, 'ema20', 0.0):.2f} — (In pullback zone, awaiting confirmation trigger)"
+                                )
                         except Exception as e:
                             logger.error(f"Error in pullback thread processing: {e}")
                             rejected["processing_error"] = rejected.get("processing_error", 0) + 1

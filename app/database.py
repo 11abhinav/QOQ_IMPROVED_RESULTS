@@ -1424,7 +1424,7 @@ def init_db():
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS telegram_queue (
                         id SERIAL PRIMARY KEY,
-                        alert_id INTEGER REFERENCES alerts(id),
+                        alert_id INTEGER REFERENCES alerts(id) ON DELETE CASCADE,
                         symbol TEXT NOT NULL,
                         message_text TEXT NOT NULL,
                         status TEXT DEFAULT 'pending',
@@ -1441,7 +1441,7 @@ def init_db():
 
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS alert_outcomes (
-                        alert_id INTEGER REFERENCES alerts(id),
+                        alert_id INTEGER REFERENCES alerts(id) ON DELETE CASCADE,
                         leg INTEGER DEFAULT 1,
                         symbol TEXT NOT NULL,
                         scanner TEXT NOT NULL,
@@ -2236,6 +2236,32 @@ def delete_todays_alerts_for_scanner(scanner_name: str, trade_date: str, conn = 
 
     def _execute(cur, commit_cb):
         nonlocal success, deleted
+        # [RULE 67: CASCADE_ALERT_DELETION_V1.0]
+        # Clean up all dependent child tables first to prevent foreign key violations (e.g. alert_outcomes_alert_id_fkey)
+        cur.execute("""
+            DELETE FROM alert_outcomes
+            WHERE alert_id IN (
+                SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
+            )
+        """, (scanner_name, trade_date))
+        cur.execute("""
+            DELETE FROM telegram_queue
+            WHERE alert_id IN (
+                SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
+            )
+        """, (scanner_name, trade_date))
+        cur.execute("""
+            DELETE FROM alert_exit_events
+            WHERE alert_id IN (
+                SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
+            )
+        """, (scanner_name, trade_date))
+        cur.execute("""
+            DELETE FROM alert_lifecycle_events
+            WHERE alert_id IN (
+                SELECT id FROM alerts WHERE scanner = %s AND alert_date = %s
+            )
+        """, (scanner_name, trade_date))
         cur.execute("""
             DELETE FROM alerts
             WHERE scanner = %s
@@ -2254,8 +2280,12 @@ def delete_todays_alerts_for_scanner(scanner_name: str, trade_date: str, conn = 
                     try:
                         with local_conn.cursor() as cur:
                             return _execute(cur, local_conn.commit)
-                    except Exception:
+                    except Exception as e:
                         logger.exception(f"❌ Failed to delete today's alerts for {scanner_name}")
+                        try:
+                            upsert_scanner_health(scanner_name, status="DEGRADED", error_msg=f"Failed to delete today's alerts: {str(e)[:200]}")
+                        except Exception:
+                            pass
                         return 0
                     finally:
                         if not success:
@@ -2265,6 +2295,10 @@ def delete_todays_alerts_for_scanner(scanner_name: str, trade_date: str, conn = 
                 return _execute(cur, lambda: None)
     except Exception as e:
         logger.exception(f"❌ Failed to delete today's alerts for {scanner_name}")
+        try:
+            upsert_scanner_health(scanner_name, status="DEGRADED", error_msg=f"Failed to delete today's alerts: {str(e)[:200]}")
+        except Exception:
+            pass
         return 0
 
 

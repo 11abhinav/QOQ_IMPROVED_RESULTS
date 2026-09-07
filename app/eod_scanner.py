@@ -409,10 +409,14 @@ def _check_eod_conditions(
         if bb_width_pctile > EOD_ADVANCED_CONFIG.get("MAX_BB_WIDTH_PCTILE", 0.80):
             return {"passed": False, "reason": f"Base too wide (BB Pctile {bb_width_pctile:.2f})"}
 
-    # [v5.3.0 UPGRADE]: 10-Day Pre-Breakout ATR <= 2.5% of Price (Tight Base Consolidation)
-    # [FIX: ATR10_DENOMINATOR] Use pre-breakout close (ticker.Close[-2]) as denominator, not
-    # the breakout-day close. The breakout day's price is already elevated; measuring ATR10
-    # against it disproportionately penalises high-priced / large-cap stocks.
+    # [RULE 67 CHANGE-RATIONALE: EOD_ATR_MODEL_A_V1]
+    # Replaced binary 2.50% cliff with certified Model A tiered scoring:
+    # <= 2.50%: 0 penalty (tight base consolidation)
+    # 2.51% - 3.50%: -3 penalty (minor volatility penalty)
+    # 3.51% - 4.50%: -7 penalty (moderate volatility penalty)
+    # > 4.50%: Hard Reject (structural ceiling)
+    base_atr_penalty = 0
+    base_atr_pct = None
     if len(ticker) >= 12 and candle_close > 0:
         import numpy as _np
         highs_10 = ticker["High"].iloc[-11:-1]
@@ -420,13 +424,21 @@ def _check_eod_conditions(
         closes_10 = ticker["Close"].iloc[-12:-2]
         tr_10 = _np.maximum(highs_10 - lows_10, _np.maximum(_np.abs(highs_10 - closes_10), _np.abs(lows_10 - closes_10)))
         atr_10 = float(tr_10.mean())
-        max_base_atr_pct = EOD_ADVANCED_CONFIG.get("MAX_BASE_ATR10_PCT", 2.5) / 100.0
-        # Use pre-breakout close as normalisation base; fall back to candle_close if unavailable
+        # Use pre-breakout close (ticker.Close[-2]) as normalization base; fall back to candle_close if unavailable
         _atr10_base_price = _safe_float(ticker["Close"].iloc[-2]) if len(ticker) >= 2 else candle_close
         if _atr10_base_price <= 0:
             _atr10_base_price = candle_close
-        if atr_10 > (_atr10_base_price * max_base_atr_pct):
-            return {"passed": False, "reason": f"Base ATR10 ({(atr_10/_atr10_base_price)*100:.2f}% of prev-close) > {max_base_atr_pct*100:.1f}% tightness floor"}
+        
+        base_atr_pct = round((atr_10 / _atr10_base_price) * 100.0, 4)
+        
+        if base_atr_pct <= 2.5000 + 1e-7:
+            base_atr_penalty = 0
+        elif base_atr_pct <= 3.5000 + 1e-7:
+            base_atr_penalty = 3
+        elif base_atr_pct <= 4.5000 + 1e-7:
+            base_atr_penalty = 7
+        else:
+            return {"passed": False, "reason": f"Base ATR10 ({base_atr_pct:.2f}% of prev-close) > 4.50% tightness ceiling"}
 
     # ── Candle quality penalties (soft, not hard) ──────────────────────────
     candle_penalty = 0
@@ -454,6 +466,8 @@ def _check_eod_conditions(
     return {
         "passed": True,
         "candle_penalty": candle_penalty,
+        "base_atr_penalty": base_atr_penalty,
+        "base_atr_pct": base_atr_pct,
         "body_ratio": body_ratio,
         "close_pos": close_pos,
         "wick_ratio": wick_ratio,
@@ -483,7 +497,8 @@ def evaluate_eod_symbol(symbol: str, df: pd.DataFrame, fund_data: dict = None, r
             "status": "NO",
             "reasons": [f"Insufficient historical price data ({len(df) if df is not None else 0} bars < 50 minimum)"],
             "score": 0.0,
-            "qualified": False
+            "qualified": False,
+            "calibration_model_version": "EOD_ATR_MODEL_A_V1"
         }
 
     ticker = df.copy()
@@ -498,12 +513,12 @@ def evaluate_eod_symbol(symbol: str, df: pd.DataFrame, fund_data: dict = None, r
     required_cols = ["Open", "High", "Low", "Close", "Volume"]
     for col in required_cols:
         if col not in ticker.columns:
-            return {"status": "NO", "reasons": [f"Missing required price column '{col}'"], "score": 0.0, "qualified": False}
+            return {"status": "NO", "reasons": [f"Missing required price column '{col}'"], "score": 0.0, "qualified": False, "calibration_model_version": "EOD_ATR_MODEL_A_V1"}
         ticker[col] = pd.Series(ticker[col]).astype(float)
 
     ticker = ticker.dropna(subset=required_cols)
     if ticker.empty or len(ticker) < 50:
-        return {"status": "NO", "reasons": [f"Insufficient valid bars ({len(ticker)} < 50)"], "score": 0.0, "qualified": False}
+        return {"status": "NO", "reasons": [f"Insufficient valid bars ({len(ticker)} < 50)"], "score": 0.0, "qualified": False, "calibration_model_version": "EOD_ATR_MODEL_A_V1"}
 
     ticker = apply_indicators(ticker, timeframe="1d")
     latest = ticker.iloc[-1]
@@ -520,7 +535,10 @@ def evaluate_eod_symbol(symbol: str, df: pd.DataFrame, fund_data: dict = None, r
             "score": 0.0,
             "qualified": False,
             "entry_price": _safe_float(latest.get("Close")),
-            "atr_20": cond.get("atr20", 0)
+            "atr_20": cond.get("atr20", 0),
+            "base_atr_pct": cond.get("base_atr_pct"),
+            "base_atr_penalty": cond.get("base_atr_penalty", 0),
+            "calibration_model_version": "EOD_ATR_MODEL_A_V1"
         }
 
     candle_close = cond["candle_close"]
@@ -550,7 +568,8 @@ def evaluate_eod_symbol(symbol: str, df: pd.DataFrame, fund_data: dict = None, r
 
     if score > 0:
         candle_pen = cond.get("candle_penalty", 0)
-        score = max(0, score - candle_pen)
+        base_atr_pen = cond.get("base_atr_penalty", 0)
+        score = max(0, score - candle_pen - base_atr_pen)
 
         # Gap-and-go extension penalty
         atr_ext = (candle_close - prior_high) / atr20 if atr20 > 0 else 0
@@ -649,7 +668,10 @@ def evaluate_eod_symbol(symbol: str, df: pd.DataFrame, fund_data: dict = None, r
         "target_2": sl_result.get("target_2"),
         "target_3": sl_result.get("target_3"),
         "target_4": sl_result.get("target_4"),
-        "atr_20": atr20
+        "atr_20": atr20,
+        "base_atr_pct": cond.get("base_atr_pct"),
+        "base_atr_penalty": cond.get("base_atr_penalty", 0),
+        "calibration_model_version": "EOD_ATR_MODEL_A_V1"
     }
 
 
@@ -1184,7 +1206,62 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                 signals = detect_breakouts(ticker, timeframe="1d")
 
                                 if len(signals) < MIN_SIGNALS:
-                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — Insufficient breakout signals ({len(signals)} < {MIN_SIGNALS})")
+                                    cmp_val = _safe_float(latest.get("Close"), 0.0)
+                                    prior_20d_high_val = _safe_float(latest.get("PRIOR_20D_HIGH"), 0.0)
+                                    if prior_20d_high_val <= 0:
+                                        if len(ticker) >= 21:
+                                            prior_20d_high_val = float(ticker["High"].iloc[-21:-1].max())
+                                        elif not ticker.empty:
+                                            prior_20d_high_val = float(ticker["High"].max())
+                                        else:
+                                            prior_20d_high_val = cmp_val
+
+                                    if len(ticker) >= 22:
+                                        avg_vol = float(ticker["Volume"].iloc[-21:-1].mean())
+                                    elif not ticker.empty:
+                                        avg_vol = float(ticker["Volume"].iloc[:-1].mean())
+                                    else:
+                                        avg_vol = 1.0
+                                    vol_ratio_val = (_safe_float(latest.get("Volume"), 0.0) / avg_vol) if avg_vol > 0 else 1.0
+                                    rsi_val = _safe_float(latest.get("RSI"), 50.0)
+                                    atr_val = _safe_float(latest.get("ATR"), 0.0)
+
+                                    dist_pct = ((prior_20d_high_val - cmp_val) / prior_20d_high_val * 100.0) if prior_20d_high_val > 0 else 0.0
+                                    sl_approx = round(cmp_val - 1.5 * atr_val, 2) if atr_val > 0 else round(cmp_val * 0.95, 2)
+                                    tgt_approx = round(cmp_val + 3.0 * atr_val, 2) if atr_val > 0 else round(cmp_val * 1.10, 2)
+                                    rr_approx = round((tgt_approx - cmp_val) / max(0.01, cmp_val - sl_approx), 2)
+
+                                    # 1. Pre-Breakout / Compression Watchlist (Consolidating within 4.5% of resistance)
+                                    if 0.0 <= dist_pct <= 4.5 and cmp_val > 0:
+                                        logger.info(
+                                            f"👁️ [EOD: PRE-BREAKOUT WATCH] {symbol} added to Watchlist (Base Consolidation | Dist: {dist_pct:.1f}%) | "
+                                            f"CMP: ₹{cmp_val:.2f} | Pending Breakout Level: ₹{prior_20d_high_val:.2f} | RVOL: {vol_ratio_val:.2f}x | "
+                                            f"RSI: {rsi_val:.1f} | SL: ₹{sl_approx:.2f} | RR: {rr_approx:.2f} — (Pending breakout trigger, not an active trade yet)"
+                                        )
+
+                                    # 2. Near-Miss Logging (Price tested/crossed resistance but volume fell short of ignition threshold)
+                                    if cmp_val >= prior_20d_high_val and vol_ratio_val < 1.80 and cmp_val > 0:
+                                        try:
+                                            from near_miss_tracker import log_near_miss
+                                            log_near_miss(
+                                                symbol=symbol,
+                                                scanner="EOD",
+                                                breakout_type="20D_BREAKOUT",
+                                                gate_name="insufficient_volume_surge",
+                                                observed_value=vol_ratio_val,
+                                                threshold_value=1.80,
+                                                entry_price=cmp_val,
+                                                stop_loss=sl_approx,
+                                                target_1=tgt_approx
+                                            )
+                                        except Exception:
+                                            pass
+
+                                    # 3. Contextual Rejection Log
+                                    logger.info(
+                                        f"🚫 [EOD] {symbol} REJECTED — Insufficient breakout signals ({len(signals)} < {MIN_SIGNALS}) "
+                                        f"(CMP: ₹{cmp_val:.2f} | 20D High: ₹{prior_20d_high_val:.2f} [dist: -{dist_pct:.1f}%] | RVOL: {vol_ratio_val:.2f}x | RSI: {rsi_val:.1f})"
+                                    )
                                     with _batch_lock:
                                         rejection_counts["weak_signals"] += 1
                                         terminal_tracker.record_terminal(symbol, "WEAK_SIGNALS", f"Breakout signals {len(signals)} < {MIN_SIGNALS}")
@@ -1314,14 +1391,14 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                 # Bucket A capped independently at -15
                                 candle_penalty = min(15, candle_penalty)
                                 if volume_ratio < MIN_VOLUME_RATIO:
-                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — Volume ratio {volume_ratio:.2f}x < {MIN_VOLUME_RATIO:.2f}x")
+                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — Volume ratio {volume_ratio:.2f}x < {MIN_VOLUME_RATIO:.2f}x (CMP: ₹{candle_close:.2f} | RSI: {rsi_val:.1f})")
                                     with _batch_lock:
                                         rejection_counts["low_volume"] += 1
                                         terminal_tracker.record_terminal(symbol, "LOW_VOLUME", f"Volume ratio {volume_ratio:.2f}x < {MIN_VOLUME_RATIO:.2f}x")
                                         telemetry_logger.record_reject(symbol, "VOLUME", "LOW_VOLUME", volume_ratio if "volume_ratio" in locals() else 0, MIN_VOLUME_RATIO if "MIN_VOLUME_RATIO" in locals() else 1.0, start_time=_row_start_time, operator="<", gate_type="THRESHOLD")
                                     return
                                 if avg_volume < MIN_AVG_VOLUME_SHARES:
-                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — Avg volume {avg_volume:.0f} < {MIN_AVG_VOLUME_SHARES:.0f} shares")
+                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — Avg volume {avg_volume:.0f} < {MIN_AVG_VOLUME_SHARES:.0f} shares (CMP: ₹{candle_close:.2f})")
                                     with _batch_lock:
                                         rejection_counts["low_avg_volume"] += 1
                                         terminal_tracker.record_terminal(symbol, "LOW_AVG_VOLUME", f"Avg volume {avg_volume:.0f} < {MIN_AVG_VOLUME_SHARES:.0f}")
@@ -1335,7 +1412,7 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                         telemetry_logger.record_reject(symbol, "PRICE", "PENNY_STOCK", candle_close if "candle_close" in locals() else 0, MIN_STOCK_PRICE if "MIN_STOCK_PRICE" in locals() else 20, start_time=_row_start_time, operator="<", gate_type="THRESHOLD")
                                     return
                                 if not (MIN_RSI <= rsi_val <= MAX_RSI):
-                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — RSI {rsi_val:.1f} outside [{MIN_RSI}, {MAX_RSI}] range")
+                                    logger.info(f"🚫 [EOD] {symbol} REJECTED — RSI {rsi_val:.1f} outside [{MIN_RSI}, {MAX_RSI}] range (CMP: ₹{candle_close:.2f} | RVOL: {volume_ratio:.2f}x)")
                                     with _batch_lock:
                                         rejection_counts["rsi_range"] += 1
                                         terminal_tracker.record_terminal(symbol, "RSI_RANGE", f"RSI {rsi_val:.1f} outside [{MIN_RSI}, {MAX_RSI}]")
@@ -1590,6 +1667,46 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                             telemetry_logger.record_reject(symbol, "STRUCTURE", "BASE_TOO_WIDE", bb_width_pctile if "bb_width_pctile" in locals() else 0, 0.80, start_time=_row_start_time)
                                         return
 
+                                # ── [RULE 67: EOD_ATR_MODEL_A_V1] BASE ATR10 CALIBRATION GATE ───────────
+                                # ATR10 / Close <= 2.50%: 0 penalty (optimal tightness)
+                                # 2.51% - 3.50%: -3 penalty (minor volatility penalty)
+                                # 3.51% - 4.50%: -7 penalty (moderate volatility penalty)
+                                # > 4.50%: Hard Reject (structural ceiling)
+                                base_atr_penalty = 0
+                                base_atr_pct = None
+                                if len(ticker) >= 12 and candle_close > 0:
+                                    import numpy as _np
+                                    highs_10 = ticker["High"].iloc[-11:-1]
+                                    lows_10 = ticker["Low"].iloc[-11:-1]
+                                    closes_10 = ticker["Close"].iloc[-12:-2]
+                                    tr_10 = _np.maximum(highs_10 - lows_10, _np.maximum(_np.abs(highs_10 - closes_10), _np.abs(lows_10 - closes_10)))
+                                    atr_10 = float(tr_10.mean())
+                                    _atr10_base_price = _safe_float(ticker["Close"].iloc[-2]) if len(ticker) >= 2 else candle_close
+                                    if _atr10_base_price <= 0:
+                                        _atr10_base_price = candle_close
+                                    base_atr_pct = round((atr_10 / _atr10_base_price) * 100.0, 4)
+
+                                    with _batch_lock:
+                                        waterfall_counts.setdefault("base_atr_list", []).append(base_atr_pct)
+                                        if base_atr_pct <= 2.5000 + 1e-7:
+                                            waterfall_counts["atr_le_250"] = waterfall_counts.get("atr_le_250", 0) + 1
+                                            base_atr_penalty = 0
+                                        elif base_atr_pct <= 3.5000 + 1e-7:
+                                            waterfall_counts["atr_251_350"] = waterfall_counts.get("atr_251_350", 0) + 1
+                                            waterfall_counts["recovered_from_cliff"] = waterfall_counts.get("recovered_from_cliff", 0) + 1
+                                            base_atr_penalty = 3
+                                        elif base_atr_pct <= 4.5000 + 1e-7:
+                                            waterfall_counts["atr_351_450"] = waterfall_counts.get("atr_351_450", 0) + 1
+                                            waterfall_counts["recovered_from_cliff"] = waterfall_counts.get("recovered_from_cliff", 0) + 1
+                                            base_atr_penalty = 7
+                                        else:
+                                            waterfall_counts["atr_gt_450_rejected"] = waterfall_counts.get("atr_gt_450_rejected", 0) + 1
+                                            logger.info(f"🚫 [EOD] {symbol} REJECTED — Base ATR10 ({base_atr_pct:.2f}%) > 4.50% tightness ceiling")
+                                            rejection_counts["base_atr_too_wide"] = rejection_counts.get("base_atr_too_wide", 0) + 1
+                                            terminal_tracker.record_terminal(symbol, "BASE_ATR_TOO_WIDE", f"Base ATR10 {base_atr_pct:.2f}% > 4.50%")
+                                            telemetry_logger.record_reject(symbol, "STRUCTURE", "BASE_ATR_TOO_WIDE", base_atr_pct, 4.50, start_time=_row_start_time)
+                                            return
+
                                 # ── v6: OBV STRUCTURE — SCORING PENALTY (not hard reject) ──────────
                                 # [FINDING-8 FIX] OBV_SLOPE is a 3-bar diff which is noisy on breakout
                                 # days. Converted from hard reject to a -5 score penalty applied after
@@ -1659,7 +1776,7 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                     # Red candle and RSI penalties applied separately (not folded into gap bucket)
                                     _bucket_misc = min(10, _red_pen + rsi_penalty)
 
-                                    total_deductions = _bucket_candle + _bucket_gap + _bucket_obv + _bucket_misc
+                                    total_deductions = _bucket_candle + _bucket_gap + _bucket_obv + _bucket_misc + base_atr_penalty
 
                                     # [FIX: TRIPLE_FAULT_VETO] If all three primary quality dimensions
                                     # simultaneously show serious weakness, reject regardless of score.
@@ -2218,7 +2335,25 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                 b_pct = dominant_bottleneck.get('attrition_pct', 0.0)
                 summary_lines.append(f"  • Dominant Bottleneck Gate  : {b_stg} ({b_elim}/{b_ent} eliminated, Attrition: {b_pct:.1f}%)")
 
+            # Compact calibration monitoring summary (EOD_ATR_MODEL_A_V1)
+            import numpy as _np
+            base_atrs = waterfall_counts.get("base_atr_list", [])
+            mean_base_atr = float(_np.mean(base_atrs)) if base_atrs else 0.0
+            median_base_atr = float(_np.median(base_atrs)) if base_atrs else 0.0
+
             summary_lines.extend([
+                "",
+                "🔬 EOD_ATR_MODEL_A_V1 CALIBRATION MONITORING:",
+                "---------------------------------------------",
+                f"  • Universe Evaluated        : {total_symbols}",
+                f"  • ATR <= 2.50% (0 pen)      : {waterfall_counts.get('atr_le_250', 0)}",
+                f"  • ATR 2.51–3.50% (-3 pen)   : {waterfall_counts.get('atr_251_350', 0)}",
+                f"  • ATR 3.51–4.50% (-7 pen)   : {waterfall_counts.get('atr_351_450', 0)}",
+                f"  • ATR > 4.50% rejected      : {waterfall_counts.get('atr_gt_450_rejected', 0)}",
+                "",
+                f"  • Recovered from old cliff  : {waterfall_counts.get('recovered_from_cliff', 0)}",
+                f"  • Mean base ATR             : {mean_base_atr:.2f}%",
+                f"  • Median base ATR           : {median_base_atr:.2f}%",
                 "",
                 "🏆 FINAL OUTCOME:",
                 f"  • Alerts Generated          : {total_alerts}",

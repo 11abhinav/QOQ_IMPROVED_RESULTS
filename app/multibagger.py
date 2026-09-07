@@ -59,8 +59,14 @@ from zoneinfo import ZoneInfo
 import requests
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from requests.adapters import HTTPAdapter
 from psycopg2.extras import execute_values
+from multibagger_state_machine import (
+    ensure_multibagger_state_table,
+    arm_setup,
+    evaluate_armed_trigger,
+    mark_alert_triggered,
+    get_active_armed_setups
+)
 
 # [FIX MUL-1] Pledge values arrive in different units depending on source:
 # - Production pipeline stores as ratio (0.0-1.0) via `pledge_val / 100.0`
@@ -2942,6 +2948,7 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
         "8_FINAL_ALERTS"
     ])
     waterfall.set_stage_count("1_UNIVERSE", len(symbols))
+    ensure_multibagger_state_table()
 
     # [VERSION: HEARTBEAT_PHASE1_v1.0] Pass run_ctx so batch_download_market_data pulses
     # a heartbeat per batch — prevents watchdog TIMEOUT_STALE on 10-15 min Phase 1 runs.
@@ -3506,7 +3513,7 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
             status = "WAITING_BUY_ZONE"
             notes = f"Conviction: {tier} | Waiting for Pullback"
             alert_triggered = False
-            logger.info(f"🚫 [MULTIBAGGER] {sym} REJECTED from Alert — Price ₹{price_data.price:.2f} not in Buy Zone [₹{buy_low:.2f} - ₹{buy_high:.2f}]")
+            logger.info(f"🚫 [MULTIBAGGER] {sym} REJECTED from Alert — Price ₹{price_data.price:.2f} not in Buy Zone [₹{buy_low:.2f} - ₹{buy_high:.2f}] (50 SMA: ₹{price_data.sma_50:.2f} | Conviction: {tier} | Score: {total:.1f})")
             terminal_tracker.record_terminal(sym, "NOT_IN_BUY_ZONE", f"Price ₹{price_data.price:.2f} not in Buy Zone [₹{buy_low:.2f} - ₹{buy_high:.2f}]")
             with _eval_lock:
                 rejection_funnel["not_in_buy_zone"] += 1
@@ -3516,12 +3523,71 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
         with _eval_lock:
             _buy_zone_passed_count += 1
 
-        _ec_ok, _ec_reason = entry_confirmed(price_data)
-        if not _ec_ok:
-            status = "WAITING_BUY_ZONE"
-            notes = f"Conviction: {tier} | In Zone, Awaiting Technical Stabilization"
+        # [RULE 67 CHANGE-RATIONALE: PHASE_3_PERSISTENT_STATE_MACHINE_V1.0]
+        # Decouple Setup Qualification (ARMED_BUY_ZONE) from Execution Confirmation (TRIGGER_CANDIDATE -> ALERT_TRIGGERED).
+        _is_new_arm, _arm_msg, _armed_rec = arm_setup(
+            symbol=sym,
+            price=price_data.price,
+            sma_50=price_data.sma_50,
+            atr_14=price_data.atr_14,
+            buy_zone_low=buy_low,
+            buy_zone_high=buy_high,
+            cqs=cqs,
+            pas=pas,
+            total_score=total,
+            conviction_tier=tier,
+            trade_date=getattr(price_data, 'last_trade_date', None)
+        )
+
+        _trigger_state, _trigger_reason, _ = evaluate_armed_trigger(
+            armed_setup=_armed_rec,
+            price_data=price_data,
+            raw_fundamentals=raw_fundamentals,
+            entry_confirmed_fn=entry_confirmed,
+            current_trade_date=getattr(price_data, 'last_trade_date', None)
+        )
+
+        if _trigger_state.startswith("INVALIDATED"):
+            status = "INVALIDATED"
+            notes = f"Conviction: {tier} | Invalidation: {_trigger_reason}"
             alert_triggered = False
-            logger.info(f"🚫 [MULTIBAGGER] {sym} REJECTED from Alert — In Buy Zone but entry_confirmed failed: {_ec_reason}")
+            logger.info(f"🚫 [MULTIBAGGER] {sym} INVALIDATED from Armed Buy Zone: {_trigger_reason}")
+            terminal_tracker.record_terminal(sym, _trigger_state, _trigger_reason)
+            with _eval_lock:
+                rejection_funnel[_trigger_state.lower()] += 1
+            append_rejection(results, sym, "INVALIDATED", notes, price=price_data.price, cqs=cqs, pas=pas, trend_score=trend, total_score=total, buy_zone_low=buy_low, buy_zone_high=buy_high, bucket=tier, price_data=price_data, raw_fundamentals=raw_fundamentals)
+            return
+
+        if _trigger_state != "TRIGGER_CANDIDATE":
+            status = "ARMED_BUY_ZONE"
+            notes = f"Conviction: {tier} | 🎯 ARMED (In Buy Zone, Awaiting Confirmation Trigger)"
+            alert_triggered = False
+            _ec_ok, _ec_reason = entry_confirmed(price_data)
+            _sl_val = round(price_data.price - 2.0 * price_data.atr_14, 2) if price_data.atr_14 > 0 else round(price_data.price * 0.90, 2)
+            _tgt_val = round(price_data.price + 4.0 * price_data.atr_14, 2) if price_data.atr_14 > 0 else round(price_data.price * 1.25, 2)
+            _rr_val = round((_tgt_val - price_data.price) / max(0.01, price_data.price - _sl_val), 2)
+            logger.info(
+                f"👁️ [MULTIBAGGER: ARMED BUY ZONE] {sym} added to Watchlist (Conviction: {tier}, Score: {total:.1f}) | "
+                f"CMP: ₹{price_data.price:.2f} | 50 SMA Level: ₹{price_data.sma_50:.2f} | Buy Zone: [₹{buy_low:.2f} - ₹{buy_high:.2f}] | "
+                f"Volume: {getattr(price_data, 'volume_ratio', 1.0):.2f}x | SL: ₹{_sl_val:.2f} | RR: {_rr_val:.2f} — (Armed in buy zone, awaiting confirmation: {_ec_reason})"
+            )
+            if getattr(price_data, 'volume_ratio', 0.0) >= 1.40:
+                try:
+                    from near_miss_tracker import log_near_miss
+                    log_near_miss(
+                        symbol=sym,
+                        scanner="MULTIBAGGER",
+                        breakout_type="BUY_ZONE_IGNITION",
+                        gate_name="insufficient_volume_surge",
+                        observed_value=float(getattr(price_data, 'volume_ratio', 1.0)),
+                        threshold_value=2.00,
+                        score=int(total),
+                        entry_price=price_data.price,
+                        stop_loss=_sl_val,
+                        target_1=_tgt_val
+                    )
+                except Exception:
+                    pass
             terminal_tracker.record_terminal(sym, f"ENTRY_CONFIRM_FAILED: {_ec_reason.upper()}", _ec_reason)
             with _eval_lock:
                 rejection_funnel[_ec_reason] += 1
@@ -3555,6 +3621,7 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
         with _eval_lock:
             alert_candidates.append({
                 "symbol": sym,
+                "setup_id": _armed_rec.get("setup_id"),
                 "price": price_data.price,
                 "tier": tier,
                 "tier_val": tier_val,
@@ -3928,9 +3995,11 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
                 else:
                     cand["rejection_status"] = "INSERT_FAILED"
                 cand["rejection_reason"] = str(reason)
-                terminal_tracker.record_terminal(sym, cand["rejection_status"], str(reason))
             else:
                 terminal_tracker.record_terminal(sym, "ALERT_GENERATED", f"Multibagger alert successfully persisted at ₹{price:.2f}")
+                setup_id = cand.get("setup_id")
+                if setup_id:
+                    mark_alert_triggered(setup_id, price)
 
             if inserted:
                 for _r in results:
