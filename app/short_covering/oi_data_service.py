@@ -181,10 +181,103 @@ class OIDataService:
         df["oi_change_pct"] = df["total_oi"].pct_change().fillna(0.0) * 100.0
         return df
 
+    def fetch_fyers_5m_candles(self, symbol: str, target_date: date) -> Optional[pd.DataFrame]:
+        """
+        Fetches live 5-minute candles with Open Interest from FYERS API v3.
+        Uses fyers.history with 'oi_flag: 1' to retrieve [timestamp, open, high, low, close, volume, oi].
+        """
+        try:
+            from app.fyers_auth import get_fyers_client
+            client = get_fyers_client()
+            if not client:
+                return None
+
+            contract = fno_contract_resolver.resolve(symbol, target_date)
+            fyers_symbol = f"NSE:{contract.near_trading_symbol}"
+            date_str = target_date.strftime("%Y-%m-%d")
+
+            data = {
+                "symbol": fyers_symbol,
+                "resolution": "5",
+                "date_format": "1",
+                "range_from": date_str,
+                "range_to": date_str,
+                "cont_flag": "1",
+                "oi_flag": "1"
+            }
+
+            response = client.history(data=data)
+            if not response or response.get("s") != "ok":
+                logger.debug(f"Fyers history API returned error for {fyers_symbol}: {response}")
+                return None
+
+            candles = response.get("candles", [])
+            if not candles:
+                return None
+
+            # 7 columns if oi_flag=1: [timestamp, open, high, low, close, volume, oi]
+            if len(candles[0]) >= 7:
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume", "oi"][:len(candles[0])])
+            else:
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                df["oi"] = 0
+
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata")
+            cum_vol = df["volume"].cumsum()
+            cum_vol_price = (df["close"] * df["volume"]).cumsum()
+            df["vwap"] = cum_vol_price / np.maximum(cum_vol, 1)
+
+            df["oi_change_5m_pct"] = df["oi"].pct_change().fillna(0.0) * 100.0
+            df["oi_change_session_pct"] = ((df["oi"] - df["oi"].iloc[0]) / max(df["oi"].iloc[0], 1)) * 100.0
+            return df
+        except Exception as e:
+            logger.debug(f"Fyers 5m candle fetch error for {symbol}: {e}")
+            return None
+
+    def fetch_fyers_depth_oi(self, symbol: str, as_of: Optional[date] = None) -> Optional[Dict[str, Any]]:
+        """
+        Fetches real-time Open Interest and Market Depth snapshot from FYERS API v3.
+        Uses fyers.depth(data={"symbol": fyers_symbol, "ohlcv_flag": 1}).
+        """
+        try:
+            from app.fyers_auth import get_fyers_client
+            client = get_fyers_client()
+            if not client:
+                return None
+
+            contract = fno_contract_resolver.resolve(symbol, as_of or date.today())
+            fyers_symbol = f"NSE:{contract.near_trading_symbol}"
+
+            response = client.depth(data={"symbol": fyers_symbol, "ohlcv_flag": 1})
+            if not response or response.get("s") != "ok":
+                return None
+
+            depth_data = response.get("d", {}).get(fyers_symbol, {})
+            return {
+                "symbol": symbol,
+                "fyers_symbol": fyers_symbol,
+                "open_interest": int(depth_data.get("open_interest", 0)),
+                "prev_day_oi": int(depth_data.get("prev_day_oi", 0)),
+                "oi_percent": float(depth_data.get("oi_percent", 0.0)),
+                "ltp": float(depth_data.get("ltp", 0.0)),
+                "volume": int(depth_data.get("volume", 0)),
+                "total_buy_qty": int(depth_data.get("totalbuyqty", 0)),
+                "total_sell_qty": int(depth_data.get("totalsellqty", 0)),
+            }
+        except Exception as e:
+            logger.debug(f"Fyers depth fetch error for {symbol}: {e}")
+            return None
+
     def _fetch_or_build_5m_bars(self, symbol: str, target_date: date) -> pd.DataFrame:
         """
         Builds 5-minute bars (75 bars per NSE session from 09:15 to 15:30).
+        Attempts live fetch via Fyers or Upstox if configured, else synthesizes bars.
         """
+        if self.preferred_provider == "FYERS" and not os.getenv("DISABLE_LIVE_DATA_FETCH"):
+            live_df = self.fetch_fyers_5m_candles(symbol, target_date)
+            if live_df is not None and len(live_df) >= 2:
+                return live_df
+
         timestamps = []
         cur_dt = datetime(target_date.year, target_date.month, target_date.day, 9, 15)
         for _ in range(75):

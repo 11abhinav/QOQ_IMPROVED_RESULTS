@@ -62,10 +62,10 @@ PROVIDER_CAPABILITY_MATRIX: Dict[str, ProviderCapability] = {
         provider_name="FYERS",
         supports_5m_price=True,
         supports_5m_volume=True,
-        supports_5m_oi=False,
-        supports_historical_oi=False,
+        supports_5m_oi=True,
+        supports_historical_oi=True,
         supports_eod_bhavcopy=False,
-        oi_resolution_notes="Fyers quotes API does not provide OI. 5m OI must be routed to Upstox/Bhavcopy."
+        oi_resolution_notes="Fyers v3 History API supports 5m OI via 'oi_flag: 1'. Quotes API does not have OI; real-time OI uses Market Depth / OptionChain API."
     ),
     "NSE_EOD": ProviderCapability(
         provider_name="NSE_EOD",

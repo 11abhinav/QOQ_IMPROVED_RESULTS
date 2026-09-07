@@ -47,9 +47,13 @@ class TestShortCoveringSystem(unittest.TestCase):
 
         fyers_cap = oi_data_service.get_provider_capability("FYERS")
         self.assertTrue(fyers_cap.supports_5m_price)
-        self.assertFalse(fyers_cap.supports_5m_oi)
+        self.assertTrue(fyers_cap.supports_5m_oi)
+        self.assertIn("oi_flag: 1", fyers_cap.oi_resolution_notes)
 
         self.assertTrue(oi_data_service.validate_provider_capabilities("supports_5m_price"))
+        self.assertTrue(oi_data_service.validate_provider_capabilities("supports_5m_oi"))
+        self.assertTrue(hasattr(oi_data_service, "fetch_fyers_5m_candles"))
+        self.assertTrue(hasattr(oi_data_service, "fetch_fyers_depth_oi"))
 
     def test_2_fno_universe(self):
         """Test F&O universe loading and sector classification."""
