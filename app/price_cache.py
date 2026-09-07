@@ -1046,6 +1046,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                 batch_validation_items = []
                 batch_indicator_jobs = []
                 batch_symbol_meta = {}
+                batch_earliest_updates = {}
 
                 for sym in batch:
                     # Ingestion Boundary Canonical Symbol Lookup: Try sym, sym.NS, sym.BO, and base symbol
