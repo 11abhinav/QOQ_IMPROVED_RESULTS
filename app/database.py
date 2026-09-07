@@ -2910,6 +2910,7 @@ def save_alert_if_new(
 
             # Record initial NEW_ENTRY event into alert_events
             try:
+                cur.execute("SAVEPOINT sp_alert_events;")
                 cand_ctx = context or {}
                 cur.execute("""
                     INSERT INTO alert_events
@@ -2922,16 +2923,20 @@ def save_alert_if_new(
                             %s, %s, 0.0, %s, %s, %s,
                             TRUE, %s, FALSE, %s, %s,
                             %s, %s, 1, 1,
-                            'INITIAL', 'INITIAL_BREAKOUT_ENTRY', %s)
-                    ON CONFLICT DO NOTHING;
+                            'INITIAL', 'INITIAL_BREAKOUT_ENTRY', %s);
                 """, (alert_id, symbol, scanner or 'TECHNICAL', str(signals or breakout_type or 'BREAKOUT').strip(),
-                      today_date, entry_price or 0.0, entry_price or 0.0, score or 80, volume_ratio or 1.0,
+                      today_date, float(entry_price or 0.0), float(entry_price or 0.0), int(score or 80), float(volume_ratio or 1.0),
                       float(cand_ctx.get("clv") or 0.75), float(cand_ctx.get("dist_from_ema20_pct") or 0.0),
-                      target_1 or (entry_price * 1.08 if entry_price else 0.0), 8.0,
-                      2.0, stop_loss or (entry_price * 0.95 if entry_price else 0.0),
+                      float(target_1 or (entry_price * 1.08 if entry_price else 0.0)), 8.0,
+                      2.0, float(stop_loss or (entry_price * 0.95 if entry_price else 0.0)),
                       f"Initial {scanner or 'TECHNICAL'} entry on {today_date}."))
+                cur.execute("RELEASE SAVEPOINT sp_alert_events;")
                 commit_cb()
             except Exception as _init_ev_err:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_alert_events;")
+                except Exception:
+                    pass
                 logger.debug(f"Initial alert_events record error: {_init_ev_err}")
 
             rs_bonus_val = kwargs.get('rs_bonus', 0)
@@ -2948,6 +2953,7 @@ def save_alert_if_new(
             ed_info = {"earnings_flag": False, "days_to_earnings": 999, "earnings_date": None, "earnings_severity": "NONE", "date_status": "UNKNOWN", "warning_msg": ""}
 
             try:
+                cur.execute("SAVEPOINT sp_alert_outcomes;")
                 cur.execute("""
                     INSERT INTO alert_outcomes
                         (alert_id, leg, symbol, scanner, regime, regime_score, base_score, rs_bonus, sector_bonus,
@@ -2957,12 +2963,17 @@ def save_alert_if_new(
                     VALUES (%s, 1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (alert_id, leg) DO NOTHING
                 """, (alert_id, symbol, scanner or 'EOD', bayesian_regime or 'BULL', regime_score_val,
-                      base_score_val, rs_bonus_val, sector_bonus_val, rs_pct_val, sector_name_val,
-                      rr_val, atr_pct_val, entry_price or 0.0, stop_loss or 0.0, target_1 or 0.0, target_2, target_3, target_4,
+                      int(base_score_val or 0), int(rs_bonus_val or 0), int(sector_bonus_val or 0), rs_pct_val, sector_name_val,
+                      rr_val, atr_pct_val, float(entry_price or 0.0), float(stop_loss or 0.0), float(target_1 or 0.0), target_2, target_3, target_4,
                       ed_info["earnings_flag"], ed_info["days_to_earnings"], ed_info["earnings_date"],
                       ed_info["earnings_severity"], ed_info["date_status"]))
+                cur.execute("RELEASE SAVEPOINT sp_alert_outcomes;")
                 commit_cb()
             except Exception as oe:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_alert_outcomes;")
+                except Exception:
+                    pass
                 logger.error(f"Failed to snapshot alert_outcome for alert {alert_id}: {oe}")
 
             msg = f'{symbol} | {category} | Buy: ₹{entry_price} | SL: ₹{stop_loss} | T1: ₹{target_1}'
