@@ -11,7 +11,7 @@ from memory_profiler import profile_function
 from datetime import time as dt_time
 import pandas as pd
 import re
-from typing import Optional, Tuple, Any, Union
+from typing import Optional, Tuple, Any, Union, Set, Dict, List
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from database import upsert_fetch_error
