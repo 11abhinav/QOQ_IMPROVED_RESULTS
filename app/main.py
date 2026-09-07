@@ -2610,21 +2610,21 @@ def _trigger_wealth_exit():
     run_wealth_intraday_update()
     return {"total_count": 1, "processed_count": 1}
 
-def _trigger_short_covering_eod():
+def _trigger_short_covering_eod(trigger_type="MANUAL", scheduler_name="MANUAL"):
     """Triggers Layer 1 EOD Short-Positioning buildup detector."""
     try:
         from app.short_covering.short_position_detector import short_position_detector
-        candidates = short_position_detector.scan_eod_universe()
+        candidates = short_position_detector.scan_eod_universe(trigger_type=trigger_type, scheduler_name=scheduler_name)
         return {"total_count": len(candidates), "processed_count": len(candidates), "type": "EOD_WATCHLIST"}
     except Exception as e:
         logger.error(f"❌ Error triggering EOD short covering scan: {e}")
         return {"total_count": 0, "processed_count": 0, "error": str(e)}
 
-def _trigger_short_covering_5m():
+def _trigger_short_covering_5m(trigger_type="SCHEDULED", scheduler_name="CRON"):
     """Triggers Layer 2 Intraday 5m Short-Covering ignition scan."""
     try:
         from app.short_covering.short_covering_scanner import short_covering_scanner
-        alerts = short_covering_scanner.run_5m_scan_cycle()
+        alerts = short_covering_scanner.run_5m_scan_cycle(trigger_type=trigger_type, scheduler_name=scheduler_name)
         return {"total_count": len(alerts), "processed_count": len(alerts), "type": "INTRADAY_IGNITION"}
     except Exception as e:
         logger.error(f"❌ Error triggering 5M short covering scan: {e}")
@@ -2633,9 +2633,9 @@ def _trigger_short_covering_5m():
 def _trigger_short_covering(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
     """Triggers Short-Covering scan (Layer 1 EOD or Layer 2 Intraday 5m cycle)."""
     if run_ctx == "EOD" or trigger_type == "EOD":
-        return _trigger_short_covering_eod()
+        return _trigger_short_covering_eod(trigger_type=trigger_type, scheduler_name=scheduler_name)
     else:
-        return _trigger_short_covering_5m()
+        return _trigger_short_covering_5m(trigger_type=trigger_type, scheduler_name=scheduler_name)
 
 
 

@@ -32,12 +32,12 @@ from app.short_covering.short_covering_schema import (
 )
 try:
     from app.lock_utils import ProcessLock
-    from app.database import upsert_scanner_health
-    from app.trading_calendar import get_latest_trading_date, is_trading_day
+    from app.database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
+    from app.trading_calendar import get_latest_trading_date, get_previous_trading_date, is_trading_day
 except ImportError:
     from lock_utils import ProcessLock
-    from database import upsert_scanner_health
-    from trading_calendar import get_latest_trading_date, is_trading_day
+    from database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
+    from trading_calendar import get_latest_trading_date, get_previous_trading_date, is_trading_day
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -49,14 +49,20 @@ class ShortCoveringEarlyIgnitionScanner:
 
     def __init__(
         self,
-        min_volume_surge_ratio: float = 1.30,
-        min_5m_oi_contraction_pct: float = -0.30,
-        min_session_oi_contraction_pct: float = -0.60,
-        min_ignition_score: float = 68.0,
+        min_5m_oi_contraction_pct: float = -0.50,
+        min_15m_oi_contraction_pct: float = -1.00,
+        min_session_oi_contraction_pct: float = -2.00,
+        min_volume_surge_ratio: float = 1.25,
+        min_rvol_diurnal: float = 1.15,
+        min_risk_reward_ratio: float = 1.30,
+        min_ignition_score: float = 65.0,
     ):
-        self.min_volume_surge_ratio = min_volume_surge_ratio
         self.min_5m_oi_contraction_pct = min_5m_oi_contraction_pct
+        self.min_15m_oi_contraction_pct = min_15m_oi_contraction_pct
         self.min_session_oi_contraction_pct = min_session_oi_contraction_pct
+        self.min_volume_surge_ratio = min_volume_surge_ratio
+        self.min_rvol_diurnal = min_rvol_diurnal
+        self.min_risk_reward_ratio = min_risk_reward_ratio
         self.min_ignition_score = min_ignition_score
 
         # Stateful candidate tracker across 5m cycles:
@@ -99,7 +105,9 @@ class ShortCoveringEarlyIgnitionScanner:
         self,
         current_time: Optional[datetime] = None,
         candidate_watchlist: Optional[List[EODShortPositionCandidate]] = None,
-        persist_db: bool = True
+        persist_db: bool = True,
+        trigger_type: str = "SCHEDULED",
+        scheduler_name: str = "CRON"
     ) -> List[ShortCoveringSignal]:
         """
         Executes one 5-minute scanning cycle across the candidate universe.
@@ -118,6 +126,21 @@ class ShortCoveringEarlyIgnitionScanner:
             logger.warning("🛑 [SHORT_COVERING_5M] Lock 'short_covering_5m_lock' held by another instance. Skipping duplicate cycle.")
             return []
 
+        run_ctx = None
+        try:
+            run_ctx = start_scanner_execution_run(
+                scanner_name="SHORT_COVERING_5M",
+                trigger_type=trigger_type,
+                scheduler_name=scheduler_name,
+                total_stocks=len(candidate_watchlist) if candidate_watchlist else 0
+            )
+        except Exception as ctx_err:
+            if "already actively running" in str(ctx_err).lower():
+                logger.warning("🛑 [SHORT_COVERING_5M] Already actively running in DB history. Skipping duplicate cycle.")
+                _scan_lock_5m.release()
+                return []
+            run_ctx = None
+
         start_t = time.monotonic()
         _SCHEDULE_STR = "Every 5m (09:20 - 15:25 IST Market Days)"
         try:
@@ -128,13 +151,16 @@ class ShortCoveringEarlyIgnitionScanner:
                     "⚠️ [SHORT_COVERING_5M] Stale watchlist detected (Latest: %s, Expected: %s). Refusing to scan obsolete candidates.",
                     max_date, expected_date
                 )
+                if run_ctx:
+                    complete_scanner_execution_run(run_ctx, status_override="SKIPPED", stop_reason=f"STALE_WATCHLIST (Latest: {max_date}, Expected: {expected_date})")
                 upsert_scanner_health(
                     scanner_name="SHORT_COVERING_5M",
                     status="OK",
                     outcome="STALE_WATCHLIST",
                     error_msg=f"STALE_WATCHLIST (Latest: {max_date}, Expected: {expected_date})",
                     duration_seconds=round(time.monotonic() - start_t, 2),
-                    scheduled_for=_SCHEDULE_STR
+                    scheduled_for=_SCHEDULE_STR,
+                    run_id=run_ctx.run_id if run_ctx else None
                 )
                 return []
 
@@ -150,6 +176,9 @@ class ShortCoveringEarlyIgnitionScanner:
 
             if not symbols_to_scan:
                 logger.info("ℹ️ [SHORT_COVERING_5M] No active short-covering candidates in watchlist. Cycle complete.")
+                if run_ctx:
+                    run_ctx.set_total_stocks(0)
+                    complete_scanner_execution_run(run_ctx)
                 upsert_scanner_health(
                     scanner_name="SHORT_COVERING_5M",
                     status="OK",
@@ -157,9 +186,13 @@ class ShortCoveringEarlyIgnitionScanner:
                     total_count=0,
                     processed_count=0,
                     duration_seconds=round(time.monotonic() - start_t, 2),
-                    scheduled_for=_SCHEDULE_STR
+                    scheduled_for=_SCHEDULE_STR,
+                    run_id=run_ctx.run_id if run_ctx else None
                 )
                 return []
+
+            if run_ctx:
+                run_ctx.set_total_stocks(len(symbols_to_scan))
 
             logger.info("⚡ [SHORT_COVERING_5M] Starting 5m ignition cycle at %s across %d candidates", current_time.strftime("%H:%M:%S"), len(symbols_to_scan))
 
@@ -185,6 +218,12 @@ class ShortCoveringEarlyIgnitionScanner:
                 self._persist_alerts(new_alerts)
 
             dur = round(time.monotonic() - start_t, 2)
+            if run_ctx:
+                run_ctx.record_fresh_data(len(symbols_to_scan))
+                if new_alerts:
+                    run_ctx.increment_alerts(len(new_alerts))
+                complete_scanner_execution_run(run_ctx)
+
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING_5M",
                 status="OK",
@@ -193,7 +232,8 @@ class ShortCoveringEarlyIgnitionScanner:
                 processed_count=len(new_alerts),
                 today_alerts=len(new_alerts),
                 duration_seconds=dur,
-                scheduled_for=_SCHEDULE_STR
+                scheduled_for=_SCHEDULE_STR,
+                run_id=run_ctx.run_id if run_ctx else None
             )
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING",
@@ -201,19 +241,23 @@ class ShortCoveringEarlyIgnitionScanner:
                 outcome="SUCCESS",
                 duration_seconds=dur,
                 today_alerts=len(new_alerts),
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
             return new_alerts
         except Exception as exc:
             dur = round(time.monotonic() - start_t, 2)
             logger.exception("❌ [SHORT_COVERING_5M] Cycle failed: %s", exc)
+            if run_ctx:
+                complete_scanner_execution_run(run_ctx, exception=exc)
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING_5M",
                 status="DOWN",
                 outcome="FAILURE",
                 error_msg=str(exc),
                 duration_seconds=dur,
-                scheduled_for=_SCHEDULE_STR
+                scheduled_for=_SCHEDULE_STR,
+                run_id=run_ctx.run_id if run_ctx else None
             )
             return []
         finally:

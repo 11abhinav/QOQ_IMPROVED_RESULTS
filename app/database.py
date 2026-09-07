@@ -3955,6 +3955,9 @@ def get_all_scanner_health() -> list[dict]:
         "PERFORMANCE_TRACKER": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
         "MULTIBAGGER_EXIT": "Exit Monitor · Every 15min (09:15 - 15:30 IST)",
         "WEALTH_EXIT": "Exit Monitor · Every 5min (09:15 - 15:30 IST)",
+        "SHORT_COVERING_EOD": "Daily 19:15 IST (Market Days)",
+        "SHORT_COVERING_5M": "Every 5m (09:20 - 15:25 IST Market Days)",
+        "SHORT_COVERING": "EOD 19:15 / 5m (09:20 - 15:25 IST)",
         "Pledge Worker": "Continuous (Daily Refresh)",
         "AI Worker": "Continuous (Sat-Sun Active)",
     }

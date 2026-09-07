@@ -23,11 +23,11 @@ from app.short_covering.oi_data_service import oi_data_service
 from app.short_covering.short_covering_schema import EODShortPositionCandidate
 try:
     from app.lock_utils import ProcessLock
-    from app.database import upsert_scanner_health
+    from app.database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
     from app.trading_calendar import get_latest_trading_date, is_trading_day
 except ImportError:
     from lock_utils import ProcessLock
-    from database import upsert_scanner_health
+    from database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
     from trading_calendar import get_latest_trading_date, is_trading_day
 
 logger = logging.getLogger(__name__)
@@ -36,23 +36,21 @@ _eod_lock = ProcessLock("short_covering_eod_lock")
 
 
 class ShortPositionDetector:
-    """Layer 1: EOD Short Positioning Engine."""
+    """
+    Layer 1 EOD Engine: Identifies stocks with accumulated short positions.
+    Scans the F&O universe at 19:15 IST daily.
+    """
 
-    def __init__(
-        self,
-        min_oi_buildup_5d_pct: float = 6.0,
-        min_short_buildup_ratio: float = 0.55,
-        max_rsi: float = 48.0,
-    ):
-        self.min_oi_buildup_5d_pct = min_oi_buildup_5d_pct
-        self.min_short_buildup_ratio = min_short_buildup_ratio
-        self.max_rsi = max_rsi
+    def __init__(self):
+        pass
 
     def scan_eod_universe(
         self,
         as_of: Optional[date] = None,
         custom_symbols: Optional[List[str]] = None,
-        persist_db: bool = True
+        persist_db: bool = True,
+        trigger_type: str = "SCHEDULED",
+        scheduler_name: str = "CRON"
     ) -> List[EODShortPositionCandidate]:
         """
         Scans the F&O universe at EOD to identify stocks with accumulated short positions.
@@ -67,22 +65,39 @@ class ShortPositionDetector:
             logger.warning("🛑 [SHORT_COVERING_EOD] Lock 'short_covering_eod_lock' held by another instance. Skipping duplicate run.")
             return []
 
+        symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
+        run_ctx = None
+        try:
+            run_ctx = start_scanner_execution_run(
+                scanner_name="SHORT_COVERING_EOD",
+                trigger_type=trigger_type,
+                scheduler_name=scheduler_name,
+                total_stocks=len(symbols)
+            )
+        except Exception as ctx_err:
+            if "already actively running" in str(ctx_err).lower():
+                logger.warning("🛑 [SHORT_COVERING_EOD] Already actively running in DB history. Skipping duplicate run.")
+                _eod_lock.release()
+                return []
+            run_ctx = None
+
         start_t = time.monotonic()
         try:
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING_EOD",
                 status="RUNNING",
                 error_msg="EOD positioning analysis in progress...",
-                scheduled_for="Daily 19:15 IST (Market Days)"
+                scheduled_for="Daily 19:15 IST (Market Days)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING",
                 status="RUNNING",
                 error_msg="EOD positioning analysis in progress...",
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
 
-            symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
             candidates: List[EODShortPositionCandidate] = []
 
             logger.info("🔍 [SHORT_COVERING_EOD] Scanning %d F&O symbols for trading date: %s", len(symbols), valid_trading_date)
@@ -104,6 +119,11 @@ class ShortPositionDetector:
                 self._persist_candidates_to_db(candidates, valid_trading_date)
 
             dur = round(time.monotonic() - start_t, 2)
+            if run_ctx:
+                run_ctx.set_total_stocks(len(symbols))
+                run_ctx.record_fresh_data(len(candidates))
+                complete_scanner_execution_run(run_ctx)
+
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING_EOD",
                 status="OK",
@@ -111,7 +131,8 @@ class ShortPositionDetector:
                 total_count=len(symbols),
                 processed_count=len(candidates),
                 duration_seconds=dur,
-                scheduled_for="Daily 19:15 IST (Market Days)"
+                scheduled_for="Daily 19:15 IST (Market Days)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING",
@@ -120,19 +141,23 @@ class ShortPositionDetector:
                 total_count=len(symbols),
                 processed_count=len(candidates),
                 duration_seconds=dur,
-                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)"
+                scheduled_for="EOD 19:15 / 5m (09:20 - 15:25 IST)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
             return candidates
         except Exception as exc:
             dur = round(time.monotonic() - start_t, 2)
             logger.exception("❌ [SHORT_COVERING_EOD] Scan failed: %s", exc)
+            if run_ctx:
+                complete_scanner_execution_run(run_ctx, exception=exc)
             upsert_scanner_health(
                 scanner_name="SHORT_COVERING_EOD",
                 status="DOWN",
                 outcome="FAILURE",
                 error_msg=str(exc),
                 duration_seconds=dur,
-                scheduled_for="Daily 19:15 IST (Market Days)"
+                scheduled_for="Daily 19:15 IST (Market Days)",
+                run_id=run_ctx.run_id if run_ctx else None
             )
             return []
         finally:

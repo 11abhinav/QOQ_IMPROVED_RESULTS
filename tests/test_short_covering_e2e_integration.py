@@ -94,7 +94,8 @@ class TestShortCoveringE2EIntegration(unittest.TestCase):
                 total_count=1,
                 processed_count=1,
                 duration_seconds=unittest.mock.ANY,
-                scheduled_for="Daily 19:15 IST (Market Days)"
+                scheduled_for="Daily 19:15 IST (Market Days)",
+                run_id=unittest.mock.ANY
             )
 
         # 2. Next Monday 09:20 AM: Run 5M Scan
@@ -136,7 +137,8 @@ class TestShortCoveringE2EIntegration(unittest.TestCase):
                 processed_count=1,
                 today_alerts=1,
                 duration_seconds=unittest.mock.ANY,
-                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)"
+                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)",
+                run_id=unittest.mock.ANY
             )
 
     # =========================================================================
@@ -166,7 +168,8 @@ class TestShortCoveringE2EIntegration(unittest.TestCase):
                 outcome="STALE_WATCHLIST",
                 error_msg=f"STALE_WATCHLIST (Latest: {stale_date}, Expected: {expected_date})",
                 duration_seconds=unittest.mock.ANY,
-                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)"
+                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)",
+                run_id=unittest.mock.ANY
             )
 
     # =========================================================================
@@ -257,7 +260,8 @@ class TestShortCoveringE2EIntegration(unittest.TestCase):
                 total_count=0,
                 processed_count=0,
                 duration_seconds=unittest.mock.ANY,
-                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)"
+                scheduled_for="Every 5m (09:20 - 15:25 IST Market Days)",
+                run_id=unittest.mock.ANY
             )
 
     # =========================================================================
@@ -283,7 +287,8 @@ class TestShortCoveringE2EIntegration(unittest.TestCase):
                 outcome="FAILURE",
                 error_msg="DB Disk Full",
                 duration_seconds=unittest.mock.ANY,
-                scheduled_for="Daily 19:15 IST (Market Days)"
+                scheduled_for="Daily 19:15 IST (Market Days)",
+                run_id=unittest.mock.ANY
             )
 
 
