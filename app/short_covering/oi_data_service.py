@@ -10,6 +10,7 @@ Provides:
 - Database caching and fallback generation
 """
 
+import os
 import logging
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
@@ -129,28 +130,30 @@ class OIDataService:
         """
         Loads daily OI records from DB or generates realistic synthetic baseline if bootstrapping.
         """
-        # Attempt DB fetch from bhavcopy_cache / daily tables if available
-        try:
-            from app.database import get_connection
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        SELECT trade_date as date, close, open, high, low, volume, total_oi, oi_change
-                        FROM bhavcopy_cache
-                        WHERE symbol = %s AND trade_date <= %s
-                        ORDER BY trade_date DESC LIMIT %s
-                        """,
-                        (symbol, as_of, lookback_days)
-                    )
-                    rows = cur.fetchall()
-                    if rows and len(rows) >= 5:
-                        df = pd.DataFrame(rows)
-                        df = df.sort_values("date").reset_index(drop=True)
-                        df["oi_change_pct"] = df["total_oi"].pct_change().fillna(0.0) * 100.0
-                        return df
-        except Exception as e:
-            logger.debug(f"DB bhavcopy query skipped/empty for {symbol}: {e}")
+        # Attempt DB fetch from bhavcopy_cache / daily tables if available and configured
+        if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
+            try:
+                from app.database import get_connection
+                with get_connection(timeout=1) as conn:
+                    if not hasattr(conn, "is_dummy") or not conn.is_dummy:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """
+                                SELECT trade_date as date, close, open, high, low, volume, total_oi, oi_change
+                                FROM bhavcopy_cache
+                                WHERE symbol = %s AND trade_date <= %s
+                                ORDER BY trade_date DESC LIMIT %s
+                                """,
+                                (symbol, as_of, lookback_days)
+                            )
+                            rows = cur.fetchall()
+                            if rows and len(rows) >= 5:
+                                df = pd.DataFrame(rows)
+                                df = df.sort_values("date").reset_index(drop=True)
+                                df["oi_change_pct"] = df["total_oi"].pct_change().fillna(0.0) * 100.0
+                                return df
+            except Exception as e:
+                logger.debug(f"DB bhavcopy query skipped/empty for {symbol}: {e}")
 
         # Fallback / local synthesis for backtest & bootstrap
         dates = [as_of - timedelta(days=i) for i in range(lookback_days * 2) if (as_of - timedelta(days=i)).weekday() < 5][:lookback_days]

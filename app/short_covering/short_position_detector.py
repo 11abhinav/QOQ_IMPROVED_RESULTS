@@ -9,6 +9,7 @@ Objective:
 - Generates the Next-Day Short-Covering Candidate Watchlist and persists to DB.
 """
 
+import os
 import logging
 from datetime import date, datetime
 from typing import List, Dict, Optional, Tuple
@@ -38,7 +39,8 @@ class ShortPositionDetector:
     def scan_eod_universe(
         self,
         as_of: Optional[date] = None,
-        custom_symbols: Optional[List[str]] = None
+        custom_symbols: Optional[List[str]] = None,
+        persist_db: bool = True
     ) -> List[EODShortPositionCandidate]:
         """
         Scans the F&O universe at EOD to identify stocks with accumulated short positions.
@@ -50,7 +52,7 @@ class ShortPositionDetector:
         symbols = custom_symbols or fno_universe_manager.get_fno_symbols()
         candidates: List[EODShortPositionCandidate] = []
 
-        logger.info(f"🔍 [Layer 1 EOD Engine] Starting scan across {len(symbols)} F&O symbols for date: {as_of}")
+        logger.debug(f"🔍 [Layer 1 EOD Engine] Starting scan across {len(symbols)} F&O symbols for date: {as_of}")
 
         for symbol in symbols:
             try:
@@ -62,11 +64,13 @@ class ShortPositionDetector:
 
         # Sort descending by buildup quality score
         candidates.sort(key=lambda c: c.buildup_quality_score, reverse=True)
-        logger.info(f"✅ [Layer 1 EOD Engine] Found {len(candidates)} short-buildup candidates for next-day watchlist")
+        logger.debug(f"✅ [Layer 1 EOD Engine] Found {len(candidates)} short-buildup candidates for next-day watchlist")
 
-        # Persist to database if available
-        self._persist_candidates_to_db(candidates, as_of)
+        # Persist to database if requested
+        if persist_db:
+            self._persist_candidates_to_db(candidates, as_of)
         return candidates
+
 
     def evaluate_symbol(
         self,
@@ -121,35 +125,37 @@ class ShortPositionDetector:
         score = 0.0
 
         # Criteria checks:
-        # A. Heavy prior short accumulation
-        if oi_5d_pct >= self.min_oi_buildup_5d_pct or oi_10d_pct >= 10.0:
+        # A. Prior short accumulation
+        if oi_5d_pct >= self.min_oi_buildup_5d_pct or oi_10d_pct >= 8.0:
             score += 35.0
             reasons.append(f"Strong 5d/10d OI expansion (+{oi_5d_pct:.1f}% / +{oi_10d_pct:.1f}%)")
-        else:
-            return None
+        elif oi_5d_pct >= 3.0 or oi_10d_pct >= 5.0:
+            score += 20.0
+            reasons.append(f"Moderate 5d/10d OI expansion (+{oi_5d_pct:.1f}%)")
 
-        # B. Consistent short buildup regime (SBR >= threshold)
+        # B. Short buildup regime (SBR)
         if sbr >= self.min_short_buildup_ratio:
             score += 25.0
             reasons.append(f"High Short Buildup Ratio ({sbr:.2f})")
-        elif sbr >= 0.40 and price_5d_pct < -2.0:
+        elif sbr >= 0.35 or price_5d_pct < -1.5:
             score += 15.0
-            reasons.append(f"Moderate Short Buildup Ratio ({sbr:.2f}) with price decline")
-        else:
-            return None
+            reasons.append(f"Moderate Short Buildup ({sbr:.2f}) with price drop ({price_5d_pct:.1f}%)")
 
         # C. Price in oversold or support-forming zone
         if rsi_14 <= self.max_rsi:
             score += 20.0
             reasons.append(f"RSI in deep base/oversold zone ({rsi_14:.1f})")
-        elif rsi_14 <= 55.0 and cur_price >= support_level * 0.99:
+        elif rsi_14 <= 58.0:
             score += 10.0
-            reasons.append(f"Price stabilizing near 10d support ({support_level:.2f})")
+            reasons.append(f"Price stabilizing near base (RSI {rsi_14:.1f})")
 
         # D. Early signs of short fatigue (OI expansion plateaued or minor 1d dip with green candle)
         if oi_1d_pct <= 0.5 and closes[-1] >= df["open"].iloc[-1]:
             score += 20.0
             reasons.append("1d OI stall/reduction with bullish lower wick")
+
+        if score < 35.0:
+            return None
 
         sector = fno_universe_manager.get_sector(symbol)
 
@@ -212,9 +218,13 @@ class ShortPositionDetector:
 
     def _persist_candidates_to_db(self, candidates: List[EODShortPositionCandidate], as_of: date) -> None:
         """Persists next-day short-covering watchlist to database."""
+        if not os.getenv("DATABASE_URL") or os.getenv("DISABLE_DB_OI_LOOKUP"):
+            return
         try:
             from app.database import get_connection
-            with get_connection() as conn:
+            with get_connection(timeout=1) as conn:
+                if hasattr(conn, "is_dummy") and conn.is_dummy:
+                    return
                 with conn.cursor() as cur:
                     # Ensure table exists
                     cur.execute("""

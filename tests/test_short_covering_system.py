@@ -14,6 +14,10 @@ Covers:
 
 import sys
 import os
+
+os.environ["DISABLE_DB_OI_LOOKUP"] = "1"
+os.environ["DATABASE_URL"] = ""
+
 from datetime import date, datetime, timedelta
 import unittest
 
@@ -73,7 +77,8 @@ class TestShortCoveringSystem(unittest.TestCase):
         test_symbols = ["TATASTEEL", "RELIANCE"]
         candidates = short_position_detector.scan_eod_universe(
             as_of=date(2026, 9, 7),
-            custom_symbols=test_symbols
+            custom_symbols=test_symbols,
+            persist_db=False
         )
         self.assertIsInstance(candidates, list)
         for c in candidates:
@@ -81,44 +86,60 @@ class TestShortCoveringSystem(unittest.TestCase):
             self.assertGreaterEqual(c.buildup_quality_score, 0.0)
 
     def test_5_layer_2_state_machine_and_tiered_scoring(self):
-        """Test Layer 2 state progression (WATCH -> IGNITION_CANDIDATE -> CONFIRMED_IGNITION)."""
-        scanner = ShortCoveringEarlyIgnitionScanner(min_ignition_score=60.0)
+        """Test Layer 2 state progression and dynamic evidence-based confirmation."""
+        import pandas as pd
+        # Create deterministic test bars for TESTSTOCK:
+        # Bar 0 (09:15): Base bar
+        # Bar 1 (09:20): Ignition pulse (Price +0.5%, OI -0.8%, Volume 2.5x)
+        test_df = pd.DataFrame({
+            "timestamp": [
+                datetime(2026, 9, 7, 9, 15),
+                datetime(2026, 9, 7, 9, 20),
+                datetime(2026, 9, 7, 9, 25),
+            ],
+            "open": [100.0, 100.5, 101.2],
+            "high": [100.8, 101.5, 102.0],
+            "low": [99.8, 100.4, 101.0],
+            "close": [100.4, 101.2, 101.8],
+            "volume": [10000, 25000, 22000],
+            "vwap": [100.2, 100.6, 101.0],
+            "oi": [1000000, 992000, 985000],
+            "oi_change_5m_pct": [0.0, -0.80, -0.70],
+            "oi_change_session_pct": [0.0, -0.80, -1.50]
+        })
+        oi_data_service._intraday_oi_cache["TESTSTOCK_5m_2026-09-07"] = test_df
 
-        mock_candidate = EODShortPositionCandidate(
-            symbol="TATASTEEL",
+        # High-conviction setup (Score >= 76) -> confirms immediately on Bar 1
+        scanner_high = ShortCoveringEarlyIgnitionScanner(min_ignition_score=60.0)
+        high_candidate = EODShortPositionCandidate(
+            symbol="TESTSTOCK",
             scan_date=date(2026, 9, 7),
-            close_price=150.0,
-            total_oi=50_000_000,
+            close_price=100.0,
+            total_oi=1_000_000,
             oi_change_pct_1d=-0.5,
-            oi_buildup_5d_pct=12.5,
-            oi_buildup_10d_pct=18.0,
-            short_buildup_ratio=0.75,
-            rsi_14=38.0,
-            support_level=145.0,
-            overhead_resistance=158.0,
-            atr_14=3.5,
-            daily_volume=20_000_000,
+            oi_buildup_5d_pct=15.0,
+            oi_buildup_10d_pct=20.0,
+            short_buildup_ratio=0.80,
+            rsi_14=35.0,
+            support_level=98.0,
+            overhead_resistance=108.0,
+            atr_14=2.0,
+            daily_volume=500_000,
             sector="METALS",
-            buildup_quality_score=85.0,
-            reasons=["Heavy prior shorts", "Oversold base hold"]
+            buildup_quality_score=90.0,
+            reasons=["Heavy prior short accumulation"]
         )
 
-        # Bar 1 (09:20): Initial ignition triggers transition
         t1 = datetime(2026, 9, 7, 9, 20)
-        alerts_1 = scanner.run_5m_scan_cycle(current_time=t1, candidate_watchlist=[mock_candidate])
-        # Verify state is tracked
-        state_tracking = scanner._tracked_states.get("TATASTEEL")
-        self.assertIsNotNone(state_tracking)
-
-        # Bar 2 (09:25): Confirming bar produces CONFIRMED_IGNITION alert
-        t2 = datetime(2026, 9, 7, 9, 25)
-        alerts_2 = scanner.run_5m_scan_cycle(current_time=t2, candidate_watchlist=[mock_candidate])
-        if alerts_2:
-            sig = alerts_2[0]
-            self.assertEqual(sig.state, ShortCoveringState.CONFIRMED_IGNITION)
-            self.assertGreater(sig.ignition_score, 0.0)
+        alerts_high = scanner_high.run_5m_scan_cycle(current_time=t1, candidate_watchlist=[high_candidate])
+        self.assertTrue(len(alerts_high) > 0)
+        sig = alerts_high[0]
+        self.assertEqual(sig.state, ShortCoveringState.CONFIRMED_IGNITION)
+        self.assertEqual(sig.alert_latency_minutes, 0.0)
+        self.assertGreater(sig.ignition_score, 75.0)
 
     def test_6_comparative_benchmark_and_move_consumed(self):
+
         """Test 3-way Comparative Benchmarking and Earlyness Metric ('Move Consumed at Alert')."""
         start_date = date(2026, 9, 1)
         end_date = date(2026, 9, 4)
@@ -136,10 +157,14 @@ class TestShortCoveringSystem(unittest.TestCase):
         self.assertIn("report_markdown", results)
 
         proposed = results["proposed_strategy"]
-        self.assertIn("median_move_consumed_pct", proposed)
-        self.assertIn("median_move_captured_pct", proposed)
+        self.assertIn("median_pre_alert_move_pct", proposed)
+        self.assertIn("median_eventual_move_consumed_pct", proposed)
+        self.assertIn("avg_post_alert_mfe_pct", proposed)
+        self.assertIn("avg_post_alert_mae_pct", proposed)
+        self.assertIn("median_latency_minutes", proposed)
         self.assertIn("profit_factor", proposed)
 
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -3,18 +3,20 @@ app/short_covering/short_covering_scanner.py
 
 Layer 2: Intraday 5-Minute Ignition Engine for Short-Covering Early Alerts.
 Features:
-- Multi-State Lifecycle Progression:
-    WATCH -> IGNITION_CANDIDATE -> CONFIRMED_IGNITION -> CONTINUATION -> EXHAUSTED
-- 5m Price + OI + Volume = Primary Early-Ignition Trigger
-- Tiered Progressive Scoring for 15m/30m structural context (30m breakout is not a hard barrier)
-- Excess OI Contraction (Stock vs Index/Sector)
-- Anti-Fake validation (rollover filter, liquidity, overhead clearance)
-- Stateful alert emission on CONFIRMED_IGNITION with deduplication
+- Evidence-Based Dynamic Confirmation:
+    High-conviction setups confirm and alert immediately on the same 5m bar without forced delay.
+    Moderate-conviction setups transition to IGNITION_CANDIDATE and confirm on subsequent evidence hold.
+- Latency Tracking: Measures exact minutes from primary ignition onset to confirmed alert.
+- Tiered Progressive Scoring for 15m/30m structural context.
+- Excess OI Contraction (Stock vs Index/Sector).
+- Anti-Fake validation (rollover filter, liquidity, overhead clearance).
+- Stateful alert emission with deduplication.
 """
 
+import os
 import logging
 from datetime import datetime, date
-from typing import List, Dict, Optional, Set, Tuple
+from typing import List, Dict, Optional, Set, Tuple, Any
 import pandas as pd
 import numpy as np
 
@@ -46,14 +48,15 @@ class ShortCoveringEarlyIgnitionScanner:
         self.min_ignition_score = min_ignition_score
 
         # Stateful candidate tracker across 5m cycles:
-        # Maps symbol -> {'state': ShortCoveringState, 'first_candidate_time': datetime, 'signal': Optional[ShortCoveringSignal]}
+        # Maps symbol -> {'state': ShortCoveringState, 'true_ignition_time': datetime, 'count': int}
         self._tracked_states: Dict[str, Dict] = {}
         self._last_scan_date: Optional[date] = None
 
     def run_5m_scan_cycle(
         self,
         current_time: Optional[datetime] = None,
-        candidate_watchlist: Optional[List[EODShortPositionCandidate]] = None
+        candidate_watchlist: Optional[List[EODShortPositionCandidate]] = None,
+        persist_db: bool = True
     ) -> List[ShortCoveringSignal]:
         """
         Executes one 5-minute scanning cycle across the candidate universe.
@@ -68,12 +71,16 @@ class ShortCoveringEarlyIgnitionScanner:
             self._last_scan_date = today
 
         if candidate_watchlist is None:
-            candidate_watchlist = self._load_eod_watchlist(today)
+            candidate_watchlist = self._load_eod_watchlist(today) if persist_db else None
 
-        candidate_map = {c.symbol: c for c in candidate_watchlist}
-        symbols_to_scan = list(candidate_map.keys()) if candidate_map else fno_universe_manager.get_fno_symbols()[:60]
+        if candidate_watchlist is not None:
+            candidate_map = {c.symbol: c for c in candidate_watchlist}
+            symbols_to_scan = list(candidate_map.keys())
+        else:
+            candidate_map = {}
+            symbols_to_scan = fno_universe_manager.get_fno_symbols()[:60]
 
-        logger.info(f"⚡ [Layer 2 5m Scanner] Starting cycle at {current_time.strftime('%H:%M:%S')} across {len(symbols_to_scan)} symbols")
+        logger.debug(f"⚡ [Layer 2 5m Scanner] Starting cycle at {current_time.strftime('%H:%M:%S')} across {len(symbols_to_scan)} symbols")
 
         new_alerts: List[ShortCoveringSignal] = []
         nifty_oi_5m_delta = self._get_index_5m_oi_delta(current_time)
@@ -88,14 +95,15 @@ class ShortCoveringEarlyIgnitionScanner:
                 )
                 if signal is not None and signal.state == ShortCoveringState.CONFIRMED_IGNITION:
                     new_alerts.append(signal)
-                    logger.info(f"🚨 [SHORT COVERING ALERT] {symbol} | Price={signal.ignition_price:.2f} | OI Contraction={signal.excess_oi_contraction:.2f}% | Score={signal.ignition_score:.1f} ({signal.grade})")
+                    logger.info(f"🚨 [SHORT COVERING ALERT] {symbol} | Price={signal.ignition_price:.2f} | Latency={signal.alert_latency_minutes:.0f}m | Score={signal.ignition_score:.1f} ({signal.grade})")
             except Exception as e:
                 logger.debug(f"Error in 5m evaluation for {symbol}: {e}")
 
-        if new_alerts:
+        if new_alerts and persist_db:
             self._persist_alerts(new_alerts)
 
         return new_alerts
+
 
     def evaluate_symbol_5m(
         self,
@@ -105,15 +113,16 @@ class ShortCoveringEarlyIgnitionScanner:
         nifty_oi_5m_delta: float = 0.0
     ) -> Optional[ShortCoveringSignal]:
         """
-        Evaluates 5m bar, state progression, and tiered structural context for an individual symbol.
+        Evaluates 5m bar, dynamic evidence-based state progression, and tiered structural context.
         """
         df_5m = oi_data_service.get_intraday_5m_data(symbol, current_time.date())
-        if df_5m is None or len(df_5m) < 4:
+        if df_5m is None or len(df_5m) < 2:
             return None
 
         past_bars = df_5m[df_5m["timestamp"] <= current_time]
-        if len(past_bars) < 3:
-            past_bars = df_5m.head(3)
+        if len(past_bars) < 2:
+            past_bars = df_5m.head(2)
+
 
         cur_bar = past_bars.iloc[-1]
         prev_bar = past_bars.iloc[-2]
@@ -125,7 +134,7 @@ class ShortCoveringEarlyIgnitionScanner:
         cur_vol = int(cur_bar["volume"])
         cur_oi = int(cur_bar["oi"])
 
-        # 1. Primary 5m Ignition Check (Price Up + OI Down + Volume Expansion)
+        # 1. Primary 5m Ignition Evidence
         is_green_candle = cur_close >= cur_open
         is_above_vwap = cur_close >= cur_vwap * 0.999
         price_change_5m_pct = ((cur_close - float(prev_bar["close"])) / float(prev_bar["close"])) * 100.0
@@ -137,60 +146,29 @@ class ShortCoveringEarlyIgnitionScanner:
         avg_vol_10 = past_bars["volume"].tail(10).mean()
         vol_surge_ratio = cur_vol / max(avg_vol_10, 1.0)
 
-        # Basic ignition filter
         has_primary_ignition = (
             is_green_candle and
             is_above_vwap and
-            price_change_5m_pct >= 0.10 and
-            (oi_change_5m_pct <= self.min_5m_oi_contraction_pct or excess_oi_contraction <= -0.25) and
-            vol_surge_ratio >= 1.15
+            price_change_5m_pct >= 0.08 and
+            (oi_change_5m_pct <= self.min_5m_oi_contraction_pct or excess_oi_contraction <= -0.20) and
+            vol_surge_ratio >= 1.10
         )
 
         # Anti-Fake Rollover Check
         if oi_data_service.is_rollover_in_progress(symbol, oi_change_5m_pct, 0.0, current_time.date()):
             return None
 
-        # 2. State Machine Management
-        tracking = self._tracked_states.get(symbol, {"state": ShortCoveringState.WATCH, "count": 0})
-        current_state = tracking["state"]
-
-        if not has_primary_ignition:
-            if current_state == ShortCoveringState.IGNITION_CANDIDATE:
-                tracking["state"] = ShortCoveringState.WATCH
-                self._tracked_states[symbol] = tracking
+        # Early Ignition Gate: Reject late entries if price has already moved > +2.5% from session open
+        extension_from_open_pct = ((cur_close - session_open_price) / max(session_open_price, 1e-4)) * 100.0
+        if extension_from_open_pct > 2.5:
+            logger.debug(f"Rejecting {symbol}: Move already extended (+{extension_from_open_pct:.1f}% from open)")
             return None
 
-        # Progress State
-        if current_state == ShortCoveringState.WATCH:
-            # Transition to IGNITION_CANDIDATE
-            tracking["state"] = ShortCoveringState.IGNITION_CANDIDATE
-            tracking["first_candidate_time"] = current_time
-            tracking["count"] = 1
-            self._tracked_states[symbol] = tracking
-            logger.debug(f"🔍 [{symbol}] State -> IGNITION_CANDIDATE at {current_time.strftime('%H:%M')}")
-            # If immediate surge is exceptionally strong (e.g. 5m volume > 2x and excess OI < -1.5%), allow single-candle ignition
-            if vol_surge_ratio < 2.2 and excess_oi_contraction > -1.2 and (eod_candidate and eod_candidate.buildup_quality_score < 80):
-                return None  # Wait for next 5m confirmation bar
 
-        elif current_state == ShortCoveringState.IGNITION_CANDIDATE:
-            # Second confirming bar -> CONFIRMED_IGNITION
-            tracking["state"] = ShortCoveringState.CONFIRMED_IGNITION
-            tracking["count"] = tracking.get("count", 1) + 1
-            self._tracked_states[symbol] = tracking
-
-        elif current_state == ShortCoveringState.CONFIRMED_IGNITION:
-            # Subsequent bar -> CONTINUATION
-            tracking["state"] = ShortCoveringState.CONTINUATION
-            self._tracked_states[symbol] = tracking
-            return None
-
-        elif current_state in (ShortCoveringState.CONTINUATION, ShortCoveringState.EXHAUSTED):
-            return None
-
-        # 3. Tiered Multi-Timeframe Structural Context (Progressive Scoring)
+        # 2. Tiered Multi-Timeframe Structural Context
         tf_confirmations = self._check_multitf_context(past_bars)
 
-        # 4. Comprehensive Scoring (0 to 100)
+        # 3. Comprehensive Ignition Scoring (0 to 100)
         score = 0.0
         reasons = []
 
@@ -206,7 +184,7 @@ class ShortCoveringEarlyIgnitionScanner:
         if excess_oi_contraction <= -1.2:
             score += 25.0
             reasons.append(f"Strong Excess OI Unwind ({excess_oi_contraction:.2f}%)")
-        elif excess_oi_contraction <= -0.6:
+        elif excess_oi_contraction <= -0.5:
             score += 18.0
             reasons.append(f"Moderate Excess OI Unwind ({excess_oi_contraction:.2f}%)")
         else:
@@ -223,14 +201,13 @@ class ShortCoveringEarlyIgnitionScanner:
             score += 8.0
 
         # D. VWAP & Price Momentum (15 pts)
-        if cur_close >= cur_vwap * 1.003 and price_change_5m_pct >= 0.35:
+        if cur_close >= cur_vwap * 1.003 and price_change_5m_pct >= 0.30:
             score += 15.0
             reasons.append("Clean VWAP acceleration")
         else:
             score += 10.0
 
         # E. Progressive 30m / 15m Structural Context (15 pts)
-        # 30m breakout is positive boost, NOT hard filter
         struct_30m = tf_confirmations.get("30m_structure", "BASE")
         if struct_30m == "BREAKOUT":
             score += 15.0
@@ -244,8 +221,56 @@ class ShortCoveringEarlyIgnitionScanner:
         else:
             score += 2.0
 
-        if score < self.min_ignition_score:
+        # 4. Evidence-Based Dynamic State Machine
+        tracking = self._tracked_states.get(symbol, {"state": ShortCoveringState.WATCH, "true_ignition_time": current_time, "count": 0})
+        current_state = tracking["state"]
+
+        if not has_primary_ignition or score < self.min_ignition_score:
+            if current_state == ShortCoveringState.IGNITION_CANDIDATE:
+                tracking["state"] = ShortCoveringState.WATCH
+                self._tracked_states[symbol] = tracking
             return None
+
+        # Evidence evaluation:
+        # High Conviction (Score >= 76 or exceptionally clean surge) -> Confirm immediately on same candle!
+        # Moderate Conviction (Score 68-76) -> Transition to candidate and confirm on next confirming pulse.
+        is_high_conviction = (score >= 76.0) or (
+            vol_surge_ratio >= 1.8 and excess_oi_contraction <= -0.8 and (eod_candidate is not None and eod_candidate.buildup_quality_score >= 70)
+        )
+
+        true_ignition_time = tracking.get("true_ignition_time", current_time)
+
+        if current_state == ShortCoveringState.WATCH:
+            true_ignition_time = current_time
+            tracking["true_ignition_time"] = true_ignition_time
+            if is_high_conviction:
+                tracking["state"] = ShortCoveringState.CONFIRMED_IGNITION
+                tracking["count"] = 1
+                self._tracked_states[symbol] = tracking
+                logger.info(f"⚡ [{symbol}] High-conviction ignition -> CONFIRMED_IGNITION immediately at {current_time.strftime('%H:%M')}")
+            else:
+                tracking["state"] = ShortCoveringState.IGNITION_CANDIDATE
+                tracking["count"] = 1
+                self._tracked_states[symbol] = tracking
+                logger.debug(f"🔍 [{symbol}] Moderate ignition -> IGNITION_CANDIDATE at {current_time.strftime('%H:%M')}")
+                return None  # Wait for confirming evidence
+
+        elif current_state == ShortCoveringState.IGNITION_CANDIDATE:
+            # Confirming evidence in subsequent candle
+            tracking["state"] = ShortCoveringState.CONFIRMED_IGNITION
+            tracking["count"] = tracking.get("count", 1) + 1
+            self._tracked_states[symbol] = tracking
+
+        elif current_state == ShortCoveringState.CONFIRMED_IGNITION:
+            tracking["state"] = ShortCoveringState.CONTINUATION
+            self._tracked_states[symbol] = tracking
+            return None
+
+        elif current_state in (ShortCoveringState.CONTINUATION, ShortCoveringState.EXHAUSTED):
+            return None
+
+        # Calculate Alert Latency
+        latency_minutes = max(0.0, (current_time - true_ignition_time).total_seconds() / 60.0)
 
         # Determine Grade
         if score >= 85.0:
@@ -274,6 +299,8 @@ class ShortCoveringEarlyIgnitionScanner:
             timestamp=current_time,
             ignition_price=cur_close,
             session_open_price=session_open_price,
+            true_ignition_time=true_ignition_time,
+            alert_latency_minutes=latency_minutes,
             vwap=cur_vwap,
             stop_loss=stop_loss,
             initial_target=target,
@@ -328,50 +355,53 @@ class ShortCoveringEarlyIgnitionScanner:
             pass
         return 0.0
 
-    def _load_eod_watchlist(self, scan_date: date) -> List[EODShortPositionCandidate]:
-        """Loads Layer 1 candidate watchlist from DB."""
+    def _load_eod_watchlist(self, target_date: date) -> List[EODShortPositionCandidate]:
+        """Loads yesterday's shortlisted candidates from DB."""
         candidates = []
-        try:
-            from app.database import get_connection
-            with get_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT symbol, scan_date, close_price, total_oi, oi_buildup_5d_pct,
-                               short_buildup_ratio, rsi_14, support_level, overhead_resistance,
-                               atr_14, buildup_quality_score, sector
-                        FROM short_covering_watchlist
-                        WHERE scan_date = %s
-                        ORDER BY buildup_quality_score DESC
-                    """, (scan_date,))
-                    rows = cur.fetchall()
-                    for r in rows:
-                        candidates.append(EODShortPositionCandidate(
-                            symbol=r["symbol"],
-                            scan_date=r["scan_date"],
-                            close_price=float(r["close_price"] or 0),
-                            total_oi=int(r["total_oi"] or 0),
-                            oi_change_pct_1d=0.0,
-                            oi_buildup_5d_pct=float(r["oi_buildup_5d_pct"] or 0),
-                            oi_buildup_10d_pct=float(r["oi_buildup_5d_pct"] or 0),
-                            short_buildup_ratio=float(r["short_buildup_ratio"] or 0.6),
-                            rsi_14=float(r["rsi_14"] or 40.0),
-                            support_level=float(r["support_level"] or 0),
-                            overhead_resistance=float(r["overhead_resistance"] or 0),
-                            atr_14=float(r["atr_14"] or 0),
-                            daily_volume=1_000_000,
-                            sector=r["sector"] or "GENERAL",
-                            buildup_quality_score=float(r["buildup_quality_score"] or 70.0),
-                            reasons=["Loaded from Layer 1 EOD watchlist"]
-                        ))
-        except Exception as e:
-            logger.debug(f"Could not load EOD watchlist from DB: {e}")
+        if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
+            try:
+                from app.database import get_connection
+                with get_connection(timeout=1) as conn:
+                    if hasattr(conn, "is_dummy") and conn.is_dummy:
+                        return []
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT * FROM short_covering_watchlist WHERE scan_date <= %s ORDER BY buildup_quality_score DESC LIMIT 40",
+                            (target_date,)
+                        )
+                        rows = cur.fetchall()
+                        for r in rows:
+                            candidates.append(EODShortPositionCandidate(
+                                symbol=r["symbol"],
+                                scan_date=r["scan_date"],
+                                close_price=float(r["close_price"] or 0),
+                                total_oi=int(r["total_oi"] or 0),
+                                oi_change_pct_1d=float(r["oi_change_pct_1d"] or 0),
+                                oi_buildup_5d_pct=float(r["oi_buildup_5d_pct"] or 0),
+                                oi_buildup_10d_pct=float(r["oi_buildup_5d_pct"] or 0),
+                                short_buildup_ratio=float(r["short_buildup_ratio"] or 0.6),
+                                rsi_14=float(r["rsi_14"] or 40.0),
+                                support_level=float(r["support_level"] or 0),
+                                overhead_resistance=float(r["overhead_resistance"] or 0),
+                                atr_14=float(r["atr_14"] or 0),
+                                daily_volume=1_000_000,
+                                sector=r["sector"] or "GENERAL",
+                                buildup_quality_score=float(r["buildup_quality_score"] or 70.0),
+                                reasons=["Loaded from Layer 1 EOD watchlist"]
+                            ))
+            except Exception as e:
+                logger.debug(f"Could not load EOD watchlist from DB: {e}")
         return candidates
 
     def _persist_alerts(self, alerts: List[ShortCoveringSignal]) -> None:
         """Persists short-covering alerts to database."""
+        if not os.getenv("DATABASE_URL") or os.getenv("DISABLE_DB_OI_LOOKUP"):
+            return
         try:
             from app.database import get_connection
-            with get_connection() as conn:
+            with get_connection(timeout=1) as conn:
+                if hasattr(conn, "is_dummy") and conn.is_dummy:
+                    return
                 with conn.cursor() as cur:
                     cur.execute("""
                         CREATE TABLE IF NOT EXISTS short_covering_alerts (
@@ -412,7 +442,7 @@ class ShortCoveringEarlyIgnitionScanner:
                         conn.commit()
             logger.info(f"💾 Persisted {len(alerts)} alerts to short_covering_alerts table")
         except Exception as e:
-            logger.debug(f"Database save for short_covering_alerts skipped: {e}")
+            logger.debug(f"Could not persist alerts to DB: {e}")
 
 
 # Global singleton instance
