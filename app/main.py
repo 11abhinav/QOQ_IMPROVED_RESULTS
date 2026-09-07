@@ -42,6 +42,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 from db_logger import install_db_logger
 install_db_logger()
 
+# 0. START FLASK DASHBOARD SERVER IMMEDIATELY (0ms latency for health checks & Coolify)
+# Must start before any database connections, network requests, or heavy module imports
+if "--worker" not in sys.argv:
+    try:
+        from dashboard_server import start_dashboard_server_async
+        start_dashboard_server_async()
+        logging.getLogger(__name__).info("🌐 [BOOT] Dashboard server started asynchronously — ports 8000/8080/80 open instantly for healthchecks!")
+    except Exception as _d_err:
+        logging.getLogger(__name__).error(f"❌ Could not start dashboard server: {_d_err}")
+
 # [VERSION: PERF_PROFILER_v1.0] Capture process startup timestamp for boot latency telemetry.
 # This lets us log how long the full boot sequence takes (imports, DB init, diagnostics).
 import time as _time

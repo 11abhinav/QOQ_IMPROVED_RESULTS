@@ -4982,11 +4982,19 @@ def start_dashboard_server():
         logger.exception(f"❌ Critical failure starting Flask dashboard server: {e}")
 
 
+_DASHBOARD_SERVER_STARTED = False
+_DASHBOARD_SERVER_LOCK = threading.Lock()
+
 def start_dashboard_server_async():
     """Starts the Flask server in a daemon thread so process boot completes in 0ms."""
-    t = threading.Thread(target=start_dashboard_server, name="FlaskDashboardServer", daemon=True)
-    t.start()
-    return t
+    global _DASHBOARD_SERVER_STARTED
+    with _DASHBOARD_SERVER_LOCK:
+        if _DASHBOARD_SERVER_STARTED:
+            return None
+        _DASHBOARD_SERVER_STARTED = True
+        t = threading.Thread(target=start_dashboard_server, name="FlaskDashboardServer", daemon=True)
+        t.start()
+        return t
 
 
 _BREAKOUT_CMP_CACHE = {}
