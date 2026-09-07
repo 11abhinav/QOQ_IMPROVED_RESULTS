@@ -110,7 +110,7 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
     """
     if _scan_lock.locked():
         logger.warning("🛑 [DUPLICATE GUARD] MULTI_TF Scanner is ALREADY actively running in thread lock. Skipping duplicate trigger.")
-        return
+        return {"status": "skipped", "reason": "already_running"}
 
     acquired_global = False
     acquired_scan = False
@@ -125,7 +125,7 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
                 record_skipped_execution_run(scanner_name="MULTI_TF", trigger_type="SCHEDULED", scheduler_name="CRON", stop_reason="Scanner lock held (previous run active)")
             except Exception:
                 pass
-            return
+            return {"status": "skipped", "reason": "already_running"}
         acquired_scan = True
 
         # Acquire universal global scanner lock
@@ -653,6 +653,12 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
             submit_background_upload(lambda: upload_history_bundle_to_db("1d", min_interval_sec=300.0))
         except Exception as _sync_err:
             logger.debug(f"[MULTI_TF] History bundle background upload dispatch error: {_sync_err}")
+
+        return {
+            "total_count": len(watchlist),
+            "processed_count": len(target_evaluation_symbols),
+            "today_alerts": alerts_generated
+        }
 
     except Exception as exc:
         duration = round(time.monotonic() - start_time, 2)

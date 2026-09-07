@@ -111,7 +111,7 @@ def start(force: bool = False, session=None, run_ctx=None, trigger_type="SCHEDUL
         logger.warning("🛑 [DUPLICATE GUARD] EOD Scanner is ALREADY actively running in thread lock. Skipping duplicate trigger.")
         if run_ctx:
             complete_scanner_execution_run(run_ctx, status_override="SKIPPED_DUPLICATE", stop_reason="Scanner lock busy")
-        return 0
+        return {"status": "skipped", "reason": "already_running"}
 
     acquired_global = False
     acquired_scan = False

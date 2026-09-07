@@ -1390,7 +1390,7 @@ def run_technical_scan(
                 record_skipped_execution_run(scanner_name="TECHNICAL", trigger_type=trigger_type, scheduler_name=scheduler_name, stop_reason="Scanner lock held (previous run active)")
             except Exception:
                 pass
-        return 0
+        return {"status": "skipped", "reason": "already_running"}
 
     acquired_global = False
     acquired_scan = False

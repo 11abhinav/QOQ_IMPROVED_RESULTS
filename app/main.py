@@ -2247,10 +2247,6 @@ def run_watchdog():
 
                 elif name in ONE_SHOT_THREADS:
                     # EOD/Reversal crashed without completing cleanly — already sent
-                    # Telegram alert inside the runner.  Just drop from tracking.
-                    logger.warning(f"⚠️ ONE-SHOT THREAD EXITED UNCLEANLY: {name} — NOT restarting (Telegram already notified).")
-                    del active_threads[name]
-
                 else:
                     # Restartable scanner crashed — revive it
                     logger.critical(f"💀 THREAD CRASH: {name} — restarting in 10s...")
@@ -2368,6 +2364,22 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
                     stats = fn(trigger_type="MANUAL", scheduler_name="MANUAL") or {}
                 else:
                     stats = fn() or {}
+                
+                # Check if scan execution was skipped due to duplicate lock guard
+                if isinstance(stats, dict) and (stats.get("status") == "skipped" or stats.get("skipped") is True):
+                    logger.warning(f"⚠️ ADMIN MANUAL TRIGGER | {scanner_key} skipped ({stats.get('reason', 'already running')})")
+                    return
+
+                # Check if primary scanner thread is still running and holds lock
+                if lock_fn:
+                    try:
+                        lock = lock_fn()
+                        if lock and hasattr(lock, "locked") and lock.locked():
+                            logger.info(f"ℹ️ ADMIN MANUAL TRIGGER | {scanner_key} execution ended while primary thread holds lock. Preserving active health state.")
+                            return
+                    except Exception:
+                        pass
+
                 duration_sec = round(time.time() - start_time, 1)
                 logger.info(f"✅ ADMIN MANUAL TRIGGER | {scanner_key} completed in {format_duration(duration_sec)}.")
             except Exception as run_err:
@@ -2392,7 +2404,7 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
 
             logger.info(f"✅ ADMIN MANUAL TRIGGER | {scanner_key} completed successfully")
         except RuntimeError as e:
-            if "already actively running" in str(e).lower():
+            if "already actively running" in str(e).lower() or "lock busy" in str(e).lower():
                 logger.warning(f"⚠️ ADMIN MANUAL TRIGGER | {scanner_key} skipped (already running)")
             else:
                 logger.exception(f"❌ ADMIN MANUAL TRIGGER | {scanner_key} FAILED")

@@ -2742,7 +2742,7 @@ def start(debug_limit: int = None, is_test_mode: bool = False, session=None, run
         logger.warning("🛑 [DUPLICATE GUARD] MULTIBAGGER Scanner is ALREADY actively running in thread lock. Skipping duplicate trigger.")
         if run_ctx:
             complete_scanner_execution_run(run_ctx, status_override="SKIPPED_DUPLICATE", stop_reason="Scanner lock busy")
-        return {}
+        return {"status": "skipped", "reason": "already_running"}
 
     acquired_global = False
     acquired_scan = False

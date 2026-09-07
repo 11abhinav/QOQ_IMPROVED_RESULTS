@@ -2766,7 +2766,7 @@ def start(force: bool = False, session=None, run_ctx=None, trigger_type="SCHEDUL
         if run_ctx:
             from database import complete_scanner_execution_run
             complete_scanner_execution_run(run_ctx, status_override="SKIPPED_DUPLICATE", stop_reason="Scanner lock busy")
-        return 0
+        return {"status": "skipped", "reason": "already_running"}
 
     acquired_global = False
     acquired_scan = False
