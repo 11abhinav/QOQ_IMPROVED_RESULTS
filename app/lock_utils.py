@@ -457,3 +457,25 @@ def release_global_lock_if_held_by(scanner_name: str):
     except Exception as e:
         logger.warning(f"Could not auto-release global lock for {scanner_name}: {e}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BROKER RESOURCE ISOLATION & PRIORITY BANDWIDTH RESERVATION
+# ─────────────────────────────────────────────────────────────────────────────
+_SCANNER_FETCH_ACTIVE = threading.Event()
+
+def set_scanner_fetch_active(active: bool = True):
+    """Signal that a primary high-priority scanner (e.g. MULTI_TF) is actively downloading market data."""
+    if active:
+        _SCANNER_FETCH_ACTIVE.set()
+    else:
+        _SCANNER_FETCH_ACTIVE.clear()
+
+def is_scanner_fetch_active() -> bool:
+    """Check if a primary scanner fetch burst is currently active."""
+    return _SCANNER_FETCH_ACTIVE.is_set()
+
+def wait_for_scanner_fetch_idle(timeout: float = 10.0):
+    """If a scanner is actively fetching data, cooperatively yield broker bandwidth."""
+    if _SCANNER_FETCH_ACTIVE.is_set():
+        _SCANNER_FETCH_ACTIVE.wait(timeout=timeout)
+

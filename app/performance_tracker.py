@@ -978,6 +978,16 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
     from market_utils import is_market_open
     is_open = is_market_open() or force_live_fetch
 
+    # [RULE 67 CHANGE-RATIONALE]: Cooperative broker yielding. If a high-priority breakout scanner (e.g. MULTI_TF)
+    # is actively executing market data downloads, briefly yield broker bandwidth to eliminate socket/rate contention.
+    try:
+        from lock_utils import is_scanner_fetch_active, wait_for_scanner_fetch_idle
+        if is_scanner_fetch_active():
+            logger.info("⏳ [PERF_TRACKER] Primary scanner fetch in progress. Cooperatively yielding broker bandwidth (up to 8s)...")
+            wait_for_scanner_fetch_idle(timeout=8.0)
+    except Exception:
+        pass
+
     logger.info(f"📈 Fetching current/last-known prices for {len(unique_symbols)} symbols...")
     current_prices = _fetch_current_prices(unique_symbols) or {}
 

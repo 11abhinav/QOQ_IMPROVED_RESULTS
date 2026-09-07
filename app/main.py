@@ -1703,7 +1703,7 @@ def run_system_scheduler():
                 if not last_wealth_market_run or (now - last_wealth_market_run).total_seconds() >= 300:
                     last_wealth_market_run = datetime.now(IST)  # set before thread start to prevent double-fire
                     _threading.Thread(
-                        target=safe_run_wealth_market_hours,
+                        target=_trigger_wealth_exit,
                         name=f"WealthExit-{now.strftime('%H%M')}",
                         daemon=True
                     ).start()
@@ -1978,7 +1978,7 @@ def check_scanner_staleness(now):
                             try:
                                 from main import trigger_scanner_manual
                                 auto_res = trigger_scanner_manual(sc)
-                                if auto_res and auto_res.get("status") == "success":
+                                if auto_res and auto_res.get("status") in ("success", "ok", "queued"):
                                     logger.info(f"🔄 [AUTO-RECOVERY] Auto-started stale scanner '{sc}' (gap: {int(gap_minutes)}m)")
                                     continue
                                 else:

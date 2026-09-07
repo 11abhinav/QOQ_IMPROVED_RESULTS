@@ -1397,6 +1397,12 @@ def evaluate_open_positions(portfolio_df, portfolio_dict):
     if portfolio_df.empty:
         return portfolio_df
 
+    from wealth_hold_tracking import HoldScoreTrendAnalyzer
+    from macro_utils import get_macro_regime
+    macro_regime = get_macro_regime()
+    unique_symbols = portfolio_df["Stock"].dropna().unique().tolist() if "Stock" in portfolio_df.columns else []
+    trend_map = HoldScoreTrendAnalyzer.analyze_trends_batch(unique_symbols)
+
     def _coerce_to_date(value):
         from datetime import date, datetime
         import pandas as pd
@@ -1566,16 +1572,11 @@ def evaluate_open_positions(portfolio_df, portfolio_dict):
 
         r["Hold_Score"] = final_hold_score
 
-        from wealth_hold_tracking import HoldScoreTrendAnalyzer
-        trend = HoldScoreTrendAnalyzer.analyze_trend(sym)
+        trend = trend_map.get(sym, {"action": "HOLD", "reason": "Stable"})
         hold_trend = trend["reason"] if trend["action"] != "HOLD" else "Stable"
         r["hold_trend"] = hold_trend
 
         # 4. Soft Exits & Review Signals
-
-        from macro_utils import get_macro_regime
-        macro_regime = get_macro_regime()
-
         rs_threshold = -40
         if macro_regime in ("BEAR", "WEAK_BEAR", "RANGEBOUND"):
             rs_threshold = -55
