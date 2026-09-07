@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
 
 IST = ZoneInfo("Asia/Kolkata")
