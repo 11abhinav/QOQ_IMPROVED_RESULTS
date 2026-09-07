@@ -4003,18 +4003,24 @@ def api_scanner_status():
                 }
                 
         # Dynamic sliding queue number calculation
+        # [VERSION: QUEUE_UI_DYNAMIC_SLIDER_v1.1]
         queued_scanners = []
         for sc, data in result.items():
-            if data["status"] and data["status"].startswith("QUEUED"):
-                # Clean up legacy QUEUED-X tags to just raw QUEUED sorting
-                queued_scanners.append((sc, data["updated_at"]))
+            st = str(data.get("status") or "")
+            if st.startswith("QUEUED"):
+                init_idx = 999
+                if "-" in st:
+                    try:
+                        init_idx = int(st.split("-")[1])
+                    except Exception:
+                        init_idx = 999
+                queued_scanners.append((init_idx, str(data.get("updated_at") or ""), sc))
         
-        # Sort by updated_at ascending (oldest first)
-        queued_scanners.sort(key=lambda x: x[1])
+        # Sort by initial queue index first, then updated_at ascending
+        queued_scanners.sort(key=lambda x: (x[0], x[1]))
         
-        # [VERSION: QUEUE_UI_DYNAMIC_SLIDER_v1.0]
         # Override the status string returned to the UI with a sliding dynamic number
-        for i, (sc, _) in enumerate(queued_scanners):
+        for i, (_, _, sc) in enumerate(queued_scanners):
             result[sc]["status"] = f"QUEUED-{i + 1}"
             
         res_payload = json.dumps(serialize_datetimes(result), default=str)

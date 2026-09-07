@@ -1113,10 +1113,10 @@ def run_all_seven_scanners_non_market_boot():
 
         from database import is_scanner_stopped, upsert_scanner_health
         
-        # 1. Mark all non-stopped scanners as QUEUED so UI reflects boot sequence queue
-        for name, _ in all_scanners:
+        # 1. Mark all non-stopped scanners as QUEUED with their explicit queue position
+        for idx, (name, _) in enumerate(all_scanners, 1):
             if not is_scanner_stopped(name):
-                upsert_scanner_health(name, status="QUEUED", error_msg="Waiting in non-market boot sequence queue...")
+                upsert_scanner_health(name, status=f"QUEUED-{idx}", error_msg=f"Waiting in non-market boot queue (position {idx} of {len(all_scanners)})...")
 
         # 2. Ensure watchlist file exists for scanners (no infinite sleep lock!)
         ensure_watchlist_exists_for_scanners()
