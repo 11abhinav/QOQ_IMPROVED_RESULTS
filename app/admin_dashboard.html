@@ -4397,7 +4397,10 @@ function getEarningsBadgeHtml(item) {
       <td>${isOpen ? '\u25bc' : '\u25b6'}</td>
       <td style="font-weight:700;color:var(--text);letter-spacing:-.3px">${t.symbol}${eventMarkHtml}${evolutionBadge}</td>
       <td style="color:var(--muted);font-family:var(--font-mono);font-size:11px">${fmtAlertTime(t.alert_time || t.entry_date)}</td>
-      <td><span class="badge badge-scanner">${t.scanner || '—'}</span></td>
+      <td>
+        <span class="badge badge-scanner">${t.scanner || '—'}</span>
+        ${t.signals ? `<div style="font-size:9px; color:var(--accent); font-weight:600; margin-top:2px;">${(t.signals).replace(/_/g, ' ')}</div>` : (t.category ? `<div style="font-size:9px; color:var(--muted); margin-top:2px;">${(t.category).replace(/_/g, ' ')}</div>` : '')}
+      </td>
       <td>${badgeHtml(t.status, t)}</td>
       <td style="text-align:center;"><button onclick="openChart('${t.symbol}', ${t.current_price || t.entry_price}); event.stopPropagation();" style="background:var(--card2); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer;" title="View Chart">📈</button></td>
       <td>${fmt(t.entry_price)}</td>
@@ -4420,6 +4423,10 @@ function getEarningsBadgeHtml(item) {
     <tr class="detail-row">
       <td colspan="15">
         <div class="detail-panel ${isOpen ? 'open' : 'closed'}" id="dp-${id}">
+          <div class="detail-item">
+            <div class="detail-label">Pattern / Signal</div>
+            <div class="detail-val" style="color:var(--accent);font-weight:700;font-size:11px;">${(t.signals || t.category || '—').replace(/_/g, ' ')}</div>
+          </div>
           <div class="detail-item">
             <div class="detail-label">Stop Loss</div>
             <div class="detail-val neg" style="font-size:11px;">
