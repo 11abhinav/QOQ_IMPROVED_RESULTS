@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 
-from technical_indicators import apply_indicators
+from technical_indicators import apply_indicators, hydrate_indicators
 from memory_profiler import MemoryProfiler
 from breakout_engine import detect_breakouts
 from scoring_engine import calculate_score
@@ -828,69 +828,97 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                 if _delivery_stale:
                     logger.info("⚠️ [EOD] Session delivery data is STALE (previous trading day's Bhavcopy)")
                 logger.info(f"🛡️ Session pledge data: {len(pledge_map)} symbols | delivery: {len(delivery_map)} symbols")
-            else:
-                # Fetch pledge map to pass to scoring engine
-                try:
-                    from database import get_pledge_map
-                    pledge_map = get_pledge_map(symbols)
-                    logger.info(f"🛡️ Fetched pledge data for {len(pledge_map)} symbols")
-                except Exception as e:
-                    logger.exception("Failed to fetch pledge map")
-                    pledge_map = {}
 
-            # [VERSION: EOD_DELIVERY_FALLBACK_v1.0] Try today first, fallback to previous days if not available
-            # [VERSION: MARKET_DATA_SESSION_v1.0] Skip this loop if session already provided delivery data above.
-            if session is None:
-                delivery_map = {}
-                seen_delivery_dates = set()
-
-                for days_back in range(0, 5):
-                    candidate = ist_now.date() - timedelta(days=days_back)
-                    while candidate.weekday() >= 5:
-                        candidate -= timedelta(days=1)
-
-                    if candidate in seen_delivery_dates:
-                        continue
-                    seen_delivery_dates.add(candidate)
+                # Parallelize RS rating, Sector scores, and Sector regime rankings
+                with ThreadPoolExecutor(max_workers=3, thread_name_prefix="EOD_PreScan") as executor:
+                    f_rot = executor.submit(get_sector_scores)
+                    f_rs = executor.submit(compute_nifty_rs_rating, symbols)
+                    f_sre = executor.submit(compute_sector_regime_rankings)
 
                     try:
-                        delivery_map = fetch_delivery_data(candidate, skip_db_save=(days_back > 0))
-                        if delivery_map:
-                            delivery_days_back = (ist_now.date() - candidate).days
-                            delivery_found = True
-                            if delivery_days_back > 0:
-                                used_fallback_data = True
-                                logger.info(f"✅ EOD Scanner using FALLBACK Bhavcopy from: {candidate}")
-                                try:
-                                    from push_service import send_push_to_all
-                                    msg = f"EOD Scanner is using stale Bhavcopy (fallback from {candidate}) because today's data is not yet published."
-                                    insert_notification("warning", "⚠️ Stale Bhavcopy Used", msg)
-                                    send_push_to_all("⚠️ Stale Bhavcopy Used", msg, bypass_throttle=True)
-                                except Exception as ne:
-                                    logger.error(f"Failed to send stale Bhavcopy notification: {ne}")
-                            else:
-                                logger.info(f"✅ EOD Scanner using TODAY'S Bhavcopy from: {candidate}")
-                            break
+                        rotation_result = f_rot.result()
+                    except Exception:
+                        rotation_result = SectorRotationResult({}, set(), set(), "", datetime.now(IST).date(), 0.0)
+                    try:
+                        rs_dict = f_rs.result()
+                    except Exception as _rse:
+                        logger.warning(f"Failed to pre-compute RS ratings: {_rse}")
+                        rs_dict = {}
+                    try:
+                        sector_rankings_dict = f_sre.result()
+                    except Exception as _sre:
+                        logger.warning(f"Failed to pre-compute sector regime rankings: {_sre}")
+                        sector_rankings_dict = {}
+            else:
+                def _fetch_pledge():
+                    try:
+                        from database import get_pledge_map
+                        p_map = get_pledge_map(symbols)
+                        logger.info(f"🛡️ Fetched pledge data for {len(p_map)} symbols")
+                        return p_map
                     except Exception as e:
-                        logger.debug(f"Delivery fetch failed for {candidate}: {e}")
+                        logger.exception("Failed to fetch pledge map")
+                        return {}
 
-            try:
-                rotation_result = get_sector_scores()
-            except Exception:
-                rotation_result = SectorRotationResult({}, set(), set(), "", datetime.now(IST).date(), 0.0)
+                def _fetch_delivery():
+                    d_map = {}
+                    d_days_back = 0
+                    fallback_used = False
+                    seen_dates = set()
+                    for days_back in range(0, 5):
+                        candidate = ist_now.date() - timedelta(days=days_back)
+                        while candidate.weekday() >= 5:
+                            candidate -= timedelta(days=1)
+                        if candidate in seen_dates:
+                            continue
+                        seen_dates.add(candidate)
+                        try:
+                            d_map = fetch_delivery_data(candidate, skip_db_save=(days_back > 0))
+                            if d_map:
+                                d_days_back = (ist_now.date() - candidate).days
+                                if d_days_back > 0:
+                                    fallback_used = True
+                                    logger.info(f"✅ EOD Scanner using FALLBACK Bhavcopy from: {candidate}")
+                                    try:
+                                        from push_service import send_push_to_all
+                                        msg = f"EOD Scanner is using stale Bhavcopy (fallback from {candidate}) because today's data is not yet published."
+                                        insert_notification("warning", "⚠️ Stale Bhavcopy Used", msg)
+                                        send_push_to_all("⚠️ Stale Bhavcopy Used", msg, bypass_throttle=True)
+                                    except Exception as ne:
+                                        logger.error(f"Failed to send stale Bhavcopy notification: {ne}")
+                                else:
+                                    logger.info(f"✅ EOD Scanner using TODAY'S Bhavcopy from: {candidate}")
+                                break
+                        except Exception as e:
+                            logger.debug(f"Delivery fetch failed for {candidate}: {e}")
+                    return d_map, d_days_back, fallback_used
 
-            # Pre-compute macro momentum rankings for entire watchlist once before scan loop
-            try:
-                rs_dict = compute_nifty_rs_rating(symbols)
-            except Exception as _rse:
-                logger.warning(f"Failed to pre-compute RS ratings: {_rse}")
-                rs_dict = {}
+                with ThreadPoolExecutor(max_workers=5, thread_name_prefix="EOD_PreScan") as executor:
+                    f_pledge = executor.submit(_fetch_pledge)
+                    f_delivery = executor.submit(_fetch_delivery)
+                    f_rot = executor.submit(get_sector_scores)
+                    f_rs = executor.submit(compute_nifty_rs_rating, symbols)
+                    f_sre = executor.submit(compute_sector_regime_rankings)
 
-            try:
-                sector_rankings_dict = compute_sector_regime_rankings()
-            except Exception as _sre:
-                logger.warning(f"Failed to pre-compute sector regime rankings: {_sre}")
-                sector_rankings_dict = {}
+                    pledge_map = f_pledge.result()
+                    delivery_map, delivery_days_back, _fb = f_delivery.result()
+                    if _fb:
+                        used_fallback_data = True
+                    delivery_found = bool(delivery_map)
+                    try:
+                        rotation_result = f_rot.result()
+                    except Exception:
+                        rotation_result = SectorRotationResult({}, set(), set(), "", datetime.now(IST).date(), 0.0)
+                    try:
+                        rs_dict = f_rs.result()
+                    except Exception as _rse:
+                        logger.warning(f"Failed to pre-compute RS ratings: {_rse}")
+                        rs_dict = {}
+                    try:
+                        sector_rankings_dict = f_sre.result()
+                    except Exception as _sre:
+                        logger.warning(f"Failed to pre-compute sector regime rankings: {_sre}")
+                        sector_rankings_dict = {}
 
         total_alerts       = 0
         approved_candidates = []
@@ -975,7 +1003,7 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
         stage_tracker.end_stage(f"Pledge: {len(pledge_map)}, Delivery: {len(delivery_map)}")
 
         import gc
-        BATCH_SIZE = int(os.environ.get("EOD_FETCH_BATCH_SIZE", "200"))
+        BATCH_SIZE = int(os.environ.get("EOD_FETCH_BATCH_SIZE", "250"))
 
         from config import ALERT_COOLDOWN_MINUTES
         cooldown_alerts = get_recent_alerts_for_scanner("EOD", ALERT_COOLDOWN_MINUTES.get("EOD", 1440))
@@ -994,10 +1022,8 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
 
         import psutil
         process = psutil.Process(os.getpid())
-        BATCH_SIZE = int(os.environ.get("EOD_FETCH_BATCH_SIZE", "50"))
 
         total_fetched_count = 0
-        logger.info(f"📥 Processing EOD phase in chunks of {BATCH_SIZE}...")
 
         with MemoryProfiler("Process Symbols"):
             for i in range(0, len(watchlist), BATCH_SIZE):
@@ -1007,7 +1033,7 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                 rss_before = process.memory_info().rss / 1024 / 1024
 
                 for _batch_run in range(1):
-                    with BatchMemoryTracker("EOD", batch_num, total_batches, len(chunk_df), collect_gc=True) as tracker:
+                    with BatchMemoryTracker("EOD", batch_num, total_batches, len(chunk_df), collect_gc=False) as tracker:
                         import pandas as pd
                         _batch_start_t = time.perf_counter()
                         # [VERSION: MARKET_DATA_SESSION_v1.0] Serve from session when available;
@@ -1166,9 +1192,15 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                     return
 
                                 # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
-                                # Hydrate indicators on-demand for candidate evaluation in parallel worker thread.
+                                # ── STAGE 1: LIGHTWEIGHT STRUCTURAL HYDRATION ───────────────────
+                                # Hydrate only lightweight structural columns (rolling highs, RSI, ATR, BASE_WIDTH, OBV)
+                                # to perform fast breakout detection and near-miss checks without paying for MACD/ADX/SMAs/EMAs.
                                 if "PRIOR_20D_HIGH" not in ticker.columns:
-                                    ticker = apply_indicators(ticker, timeframe="1d")
+                                    ticker = hydrate_indicators(
+                                        ticker,
+                                        required={"PRIOR_20D_HIGH", "HIGH_52W", "HIGH_20D", "HIGH_50D", "HIGH_100D", "HIGH_252D", "RSI", "ATR", "ATR20", "BASE_WIDTH", "OBV"},
+                                        timeframe="1d"
+                                    )
 
                                 if ticker is None or ticker.empty:
                                     with _batch_lock:
@@ -1180,28 +1212,6 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                 latest = ticker.iloc[-1]
                                 ctx = telemetry_logger.get_or_create_context(symbol)
                                 ctx.capture_dataframe_row(latest, is_fallback=used_fallback_data)
-                                ctx.capture_indicators(
-                                    rsi=_safe_float(latest.get("RSI")),
-                                    sma20=_safe_float(latest.get("SMA20")),
-                                    sma50=_safe_float(latest.get("SMA50")),
-                                    sma100=_safe_float(latest.get("SMA100")),
-                                    sma200=_safe_float(latest.get("SMA200")),
-                                    ema9=_safe_float(latest.get("EMA9")),
-                                    ema15=_safe_float(latest.get("EMA15")),
-                                    ema20=_safe_float(latest.get("EMA20")),
-                                    ema50=_safe_float(latest.get("EMA50")),
-                                    ema200=_safe_float(latest.get("EMA200")),
-                                    macd=_safe_float(latest.get("MACD")),
-                                    macd_signal=_safe_float(latest.get("MACD_SIGNAL")),
-                                    macd_hist=_safe_float(latest.get("MACD_HIST")),
-                                    atr=_safe_float(latest.get("ATR")),
-                                    adx=_safe_float(latest.get("ADX")),
-                                    obv=_safe_float(latest.get("OBV")),
-                                    prior_20d_high=_safe_float(latest.get("PRIOR_20D_HIGH")),
-                                    bb_width_pctile=_safe_float(latest.get("BB_WIDTH_PCTILE"))
-                                )
-                                with _batch_lock:
-                                    waterfall_counts["structure_entered"] += 1
 
                                 signals = detect_breakouts(ticker, timeframe="1d")
 
@@ -1512,11 +1522,35 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                                             telemetry_logger.record_reject(symbol, "STRUCTURE", "NO_ATR_EXPANSION", atr_expansion, min_atr_expansion, start_time=_row_start_time, operator="<", gate_type="THRESHOLD")
                                         return
 
-                                # [FIX P1-2] Removed redundant BB_WIDTH_PCTILE check on the current bar.
-                                # The base_too_wide filter at line 776 already checks the PREVIOUS bar's
-                                # BB_WIDTH_PCTILE, which is the correct pre-breakout snapshot. Checking the
-                                # current (breakout) bar's BB width is self-defeating because BB expands on
-                                # breakout candles.
+                                # ── STAGE 2: FULL INDICATOR HYDRATION FOR QUALIFIED CANDIDATES ──
+                                # At this point, the symbol has cleared all Stage 1 structural, volume,
+                                # and breakout gates. Hydrate the complete indicator suite (EMA/SMA/ADX/MACD/BB)
+                                # before evaluating trend alignment and Bayesian composite score.
+                                ticker = hydrate_indicators(ticker, required=None, timeframe="1d")
+                                latest = ticker.iloc[-1]
+
+                                ctx.capture_indicators(
+                                    rsi=_safe_float(latest.get("RSI")),
+                                    sma20=_safe_float(latest.get("SMA20")),
+                                    sma50=_safe_float(latest.get("SMA50")),
+                                    sma100=_safe_float(latest.get("SMA100")),
+                                    sma200=_safe_float(latest.get("SMA200")),
+                                    ema9=_safe_float(latest.get("EMA9")),
+                                    ema15=_safe_float(latest.get("EMA15")),
+                                    ema20=_safe_float(latest.get("EMA20")),
+                                    ema50=_safe_float(latest.get("EMA50")),
+                                    ema200=_safe_float(latest.get("EMA200")),
+                                    macd=_safe_float(latest.get("MACD")),
+                                    macd_signal=_safe_float(latest.get("MACD_SIGNAL")),
+                                    macd_hist=_safe_float(latest.get("MACD_HIST")),
+                                    atr=_safe_float(latest.get("ATR")),
+                                    adx=_safe_float(latest.get("ADX")),
+                                    obv=_safe_float(latest.get("OBV")),
+                                    prior_20d_high=_safe_float(latest.get("PRIOR_20D_HIGH")),
+                                    bb_width_pctile=_safe_float(latest.get("BB_WIDTH_PCTILE"))
+                                )
+                                with _batch_lock:
+                                    waterfall_counts["structure_entered"] += 1
 
                                 if "EMA20" in ticker.columns and not pd.isna(latest.get("EMA20")):
                                     if candle_close < _safe_float(latest.get("EMA20")):
@@ -2238,6 +2272,12 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                         f"entry=₹{c['entry_price']:.2f} | sl=₹{round(float(c['stop_loss'] or 0.0))} | t1=₹{round(float(c['target_price'] or 0.0))} | "
                         f"last_bar={_last_bar_date} | category={c['category']}"
                     )
+
+            # Run single garbage collection pass after all batch evaluations complete
+            try:
+                gc.collect()
+            except Exception:
+                pass
 
             # ── VERIFICATION & STATUS ────────────────────────────────────────────────────
             stage_tracker.end_stage(f"Evaluated {len(watchlist)} stocks | Alerts found: {total_alerts}")

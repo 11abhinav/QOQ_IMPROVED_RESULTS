@@ -69,6 +69,79 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+def normalize_fundamentals(fund_data: Optional[Dict[str, Any]]) -> Tuple[Optional[Dict[str, float]], List[str]]:
+    """
+    Normalizes fundamental dictionary fields across casing, formats, and providers.
+    Does not synthesize missing metrics from proxies.
+    Returns (normalized_dict, missing_fields).
+    """
+    if not fund_data or not isinstance(fund_data, dict):
+        return None, ["fund_data_absent"]
+
+    # 1. ROE (Percentage, e.g. 15.0 or 0.15)
+    roe_raw = None
+    for k in ["ROE", "roe", "returnOnEquity", "return_on_equity"]:
+        if k in fund_data and fund_data[k] is not None:
+            v = _safe_float(fund_data[k], float('nan'))
+            if not math.isnan(v):
+                roe_raw = v * 100.0 if (0.0 < abs(v) <= 1.5 and "return" in k) else v
+                break
+
+    # 2. ROCE (Percentage, e.g. 18.0)
+    roce_raw = None
+    for k in ["ROCE", "roce", "returnOnCapitalEmployed", "return_on_capital_employed"]:
+        if k in fund_data and fund_data[k] is not None:
+            v = _safe_float(fund_data[k], float('nan'))
+            if not math.isnan(v):
+                roce_raw = v * 100.0 if (0.0 < abs(v) <= 1.5 and "return" in k) else v
+                break
+
+    # 3. Debt/Equity (Ratio, e.g. 0.40)
+    debt_eq_raw = None
+    for k in ["DebtEquity", "debt_equity", "debt_to_equity", "debtToEquity"]:
+        if k in fund_data and fund_data[k] is not None:
+            v = _safe_float(fund_data[k], float('nan'))
+            if not math.isnan(v):
+                debt_eq_raw = v
+                break
+
+    # 4. Sales Growth (Percentage, e.g. 12.0 or 0.12)
+    sales_gr_raw = None
+    for k in ["SalesGrowth", "sales_growth", "revenue_cagr_3y", "yoy_revenue", "revenue_growth", "total_revenue_yoy_growth_ttm"]:
+        if k in fund_data and fund_data[k] is not None:
+            v = _safe_float(fund_data[k], float('nan'))
+            if not math.isnan(v):
+                sales_gr_raw = v * 100.0 if (0.0 < abs(v) <= 1.5 and ("growth" in k or k == "revenue_cagr_3y")) else v
+                break
+
+    # 5. PAT Growth (Percentage, e.g. 10.0 or 0.10)
+    pat_gr_raw = None
+    for k in ["PATGrowth", "pat_growth", "yoy_profit", "profit_growth", "earnings_growth", "net_income_growth"]:
+        if k in fund_data and fund_data[k] is not None:
+            v = _safe_float(fund_data[k], float('nan'))
+            if not math.isnan(v):
+                pat_gr_raw = v * 100.0 if (0.0 < abs(v) <= 1.5 and "growth" in k) else v
+                break
+
+    missing = []
+    if roe_raw is None: missing.append("ROE")
+    if roce_raw is None: missing.append("ROCE")
+    if debt_eq_raw is None: missing.append("DebtEquity")
+    if sales_gr_raw is None: missing.append("SalesGrowth")
+    if pat_gr_raw is None: missing.append("PATGrowth")
+
+    if missing:
+        return None, missing
+
+    return {
+        "roe": roe_raw,
+        "roce": roce_raw,
+        "debt_equity": debt_eq_raw,
+        "sales_growth": sales_gr_raw,
+        "pat_growth": pat_gr_raw,
+    }, []
+
+
 class AccumulationScanner:
     def __init__(self, batch_size: int = ACCUMULATION_DEFAULT_BATCH_SIZE):
         self.batch_size = batch_size
@@ -160,22 +233,15 @@ class AccumulationScanner:
           Technical score stays on native 0-90 scale and marked TECHNICAL_ONLY.
         - INSUFFICIENT_EVIDENCE: Required inputs unusable.
         """
-        if not fund_data or not isinstance(fund_data, dict):
-            return 0.0, True, "REDUCED_CONFIDENCE", ["Fundamental data unavailable — evaluating technicals on native 0-90 scale"]
-
-        req_keys = ["ROE", "ROCE", "DebtEquity", "SalesGrowth", "PATGrowth"]
-        missing_keys = [
-            k for k in req_keys
-            if k not in fund_data or fund_data.get(k) is None or math.isnan(_safe_float(fund_data.get(k), float('nan')))
-        ]
-        if missing_keys:
+        norm_dict, missing_keys = normalize_fundamentals(fund_data)
+        if not norm_dict:
             return 0.0, True, "REDUCED_CONFIDENCE", [f"Incomplete fundamental dataset (missing {', '.join(missing_keys)}) — technical-only evaluation on native 0-90 scale"]
 
-        roe = _safe_float(fund_data.get("ROE"))
-        roce = _safe_float(fund_data.get("ROCE"))
-        debt_eq = _safe_float(fund_data.get("DebtEquity"))
-        sales_gr = _safe_float(fund_data.get("SalesGrowth"))
-        pat_gr = _safe_float(fund_data.get("PATGrowth"))
+        roe = norm_dict["roe"]
+        roce = norm_dict["roce"]
+        debt_eq = norm_dict["debt_equity"]
+        sales_gr = norm_dict["sales_growth"]
+        pat_gr = norm_dict["pat_growth"]
 
         reasons = []
         score = 10.0
@@ -544,6 +610,12 @@ class AccumulationScanner:
             watchlist_count = 0
             opp_manager = OpportunityManager(policy={})
 
+            try:
+                from fundamentals_cache import init_fundamentals_registry, get_fundamentals
+                init_fundamentals_registry()
+            except Exception as f_init_err:
+                logger.debug("Fundamentals registry warmup info: %s", f_init_err)
+
             # Batch processing loop
             batches = [symbols[i:i + self.batch_size] for i in range(0, len(symbols), self.batch_size)]
             _last_hb = time.monotonic()
@@ -596,11 +668,18 @@ class AccumulationScanner:
                         if run_ctx:
                             run_ctx.mark_incomplete()
                         terminal_tracker.record_terminal(sym, "DATA_MISSING", "Insufficient price history or missing dataframe")
+                        logger.info(f"🚫 [ACCUMULATION] {sym} REJECTED — Gate: DATA_MISSING | Reason: Insufficient price history or missing dataframe")
+
+                    sym_fund_data = None
+                    try:
+                        sym_fund_data = get_fundamentals(sym)
+                    except Exception as fe:
+                        logger.debug("Failed to fetch fundamentals for %s: %s", sym, fe)
 
                     res = self.evaluate_symbol(
                         symbol=sym,
                         df=df if isinstance(df, pd.DataFrame) else None,
-                        fund_data=None,
+                        fund_data=sym_fund_data,
                         nifty_20d_ret=nifty_20d_ret,
                         run_id=run_id
                     )
@@ -625,8 +704,8 @@ class AccumulationScanner:
                         if state == "BREAKOUT_READY" and qual_state == "ACTIONABLE" and evidence_conf == "FULL_CONFIDENCE":
                             waterfall_counts["state_breakout_ready"] += 1
                             logger.info(
-                                f"🚀 [ACCUMULATION: BREAKOUT TRIGGERED] {sym} triggered actionable breakout entry! "
-                                f"Score: {score:.1f}/100 | CMP: ₹{res['cmp']} | Trigger Entry: ₹{sl_tgt['breakout_level']} | "
+                                f"📍 PICKED [ACCUMULATION: BREAKOUT_READY]: {sym} @ ₹{res['cmp']:.2f} | "
+                                f"Score: {score:.1f}/100 ({qual_state}, {evidence_conf}) | Breakout Trigger: ₹{sl_tgt['breakout_level']} | "
                                 f"SL: ₹{sl_tgt['stop_loss']} | Target 1: ₹{sl_tgt['target_1']} (RR: {sl_tgt['rr_1']:.2f})"
                             )
                             inserted, reason_msg, _, _ = save_alert_if_new(
@@ -661,8 +740,8 @@ class AccumulationScanner:
                         else:
                             terminal_tracker.record_terminal(sym, "WATCHLIST_ONLY", f"Tracking {state} ({qual_state}, {evidence_conf}, score {score:.1f})")
                             logger.info(
-                                f"👁️ [ACCUMULATION: {state.replace('_', ' ')}] {sym} added to Watchlist ({qual_state}, Base Score: {score:.1f}) | "
-                                f"CMP: ₹{res['cmp']} | Pending Breakout Level: ₹{sl_tgt['breakout_level']} | "
+                                f"👁️ [ACCUMULATION: WATCHLIST] {sym} | State: {state.replace('_', ' ')} ({qual_state}, {evidence_conf}) | "
+                                f"Score: {score:.1f}/100 | CMP: ₹{res['cmp']:.2f} | Pending Breakout Level: ₹{sl_tgt['breakout_level']} | "
                                 f"SL: ₹{sl_tgt['stop_loss']} | RR: {sl_tgt['rr_1']:.2f} — (Pending breakout trigger, not an active trade yet)"
                             )
                         
@@ -696,19 +775,19 @@ class AccumulationScanner:
                                     cur.execute(
                                         """
                                         INSERT INTO accumulation_alerts (
-                                            run_id, audit_snapshot_id, symbol, state, tradable,
-                                            score, accumulation_score, compression_score, relative_strength_score,
-                                            resistance_score, volume_structure_score, fundamental_score,
-                                            close, entry_zone_low, entry_zone_high, breakout_level, stop_loss,
-                                            target_1, target_2, target_3, risk_pct, rr_1, rr_2, rr_3,
-                                            time_stop_days, invalidation_reason, created_at, effective_as_of
+                                             run_id, audit_snapshot_id, symbol, state, tradable,
+                                             score, accumulation_score, compression_score, relative_strength_score,
+                                             resistance_score, volume_structure_score, fundamental_score,
+                                             close, entry_zone_low, entry_zone_high, breakout_level, stop_loss,
+                                             target_1, target_2, target_3, risk_pct, rr_1, rr_2, rr_3,
+                                             time_stop_days, invalidation_reason, created_at, effective_as_of
                                         ) VALUES (
-                                            %s, %s, %s, %s, %s,
-                                            %s, %s, %s, %s,
-                                            %s, %s, %s,
-                                            %s, %s, %s, %s, %s,
-                                            %s, %s, %s, %s, %s, %s, %s,
-                                            %s, %s, NOW(), NOW()
+                                             %s, %s, %s, %s, %s,
+                                             %s, %s, %s, %s,
+                                             %s, %s, %s,
+                                             %s, %s, %s, %s, %s,
+                                             %s, %s, %s, %s, %s, %s, %s,
+                                             %s, %s, NOW(), NOW()
                                         ) ON CONFLICT (symbol, state, run_id) DO NOTHING
                                         """,
                                         (
@@ -730,12 +809,18 @@ class AccumulationScanner:
                     else:
                         health.record_metrics(rejected_inc=1)
                         rej_reason = res.get("reason", "UNKNOWN_REJECTION")
+                        rej_code = res.get("reason_code", "REJECTED")
                         if "FUNDAMENTAL" in rej_reason:
                             terminal_tracker.record_terminal(sym, "FUNDAMENTAL_FAIL", rej_reason)
                         elif "SCORE" in rej_reason:
                             terminal_tracker.record_terminal(sym, "SCORE_FAIL", f"Score {res.get('score', 0.0):.1f} below threshold")
                         else:
                             terminal_tracker.record_terminal(sym, "SCORE_FAIL", rej_reason)
+
+                        logger.info(
+                            f"🚫 [ACCUMULATION] {sym} REJECTED — Gate: {rej_code} | "
+                            f"Reason: {rej_reason} | Score: {res.get('score', 0.0):.1f}/100 ({res.get('evidence_confidence', 'UNKNOWN')})"
+                        )
 
                         try:
                             sc_val = float(res.get("score", 0.0))

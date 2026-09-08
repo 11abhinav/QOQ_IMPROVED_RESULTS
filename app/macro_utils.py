@@ -418,7 +418,7 @@ def compute_nifty_rs_rating(symbols: list = None) -> dict:
     try:
         from price_cache import fetch_unified_historical
         fetch_list = list(set(symbols + ["NIFTY 50"]))
-        historical_dict = fetch_unified_historical(fetch_list, period="6mo", interval="1d", requester="rs_rating")
+        historical_dict = fetch_unified_historical(fetch_list, period="1y", interval="1d", requester="rs_rating")
 
         nifty_df = historical_dict.get("NIFTY 50")
         if nifty_df is None or nifty_df.empty or len(nifty_df) < 20:
