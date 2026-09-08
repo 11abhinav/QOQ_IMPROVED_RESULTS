@@ -3014,7 +3014,6 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
     # after all 750 symbols finish downloading, replacing 15 redundant sub-batch uploads.
     try:
         from database import upload_history_bundle_to_db
-        import threading
         def upload_mb_bundle_job():
             t_name = threading.current_thread().name
             logger.info(f"🚀 [BACKGROUND WORKER START] Worker='{t_name}' | InitiatedBy='MultibaggerScanner' | Action='Uploading 1d history bundle to DB'")
@@ -3282,7 +3281,6 @@ def _start_wrapper(debug_limit: int = None, is_test_mode: bool = False, session=
     # by the same thread never suffer from self-deadlock.
     _eval_lock = threading.RLock()
 
-    import threading
     eval_stats = {
         "count": 0,
         "pledge_ms": [],
