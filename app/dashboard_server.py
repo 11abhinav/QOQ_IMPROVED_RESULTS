@@ -2368,11 +2368,18 @@ def _get_shortlist_cache():
         registry.put("shortlist_cache", data)
     return data
 
+_SHORTLIST_MEMO_CACHE = {"ts": 0.0, "payload": None}
+
 @app.route("/api/shortlist")
 @login_required
 def api_shortlist():
-    """Returns the elite fundamental watchlist data as JSON. Cached in-memory by file mtime."""
+    """Returns the elite fundamental watchlist data as JSON with live CMP enrichment and 10s micro-cache."""
+    global _SHORTLIST_MEMO_CACHE
     from config import WATCHLIST_PATH, DATA_DIR
+    now_ts = time.time()
+    if _SHORTLIST_MEMO_CACHE["payload"] is not None and (now_ts - _SHORTLIST_MEMO_CACHE["ts"]) < 10.0:
+        return Response(_SHORTLIST_MEMO_CACHE["payload"], mimetype="application/json")
+
     try:
         target_path = WATCHLIST_PATH
         if not os.path.exists(target_path):
@@ -2391,11 +2398,6 @@ def api_shortlist():
                 target_path = os.path.join(DATA_DIR, "elite_fundamental_watchlist.csv")
                 if not os.path.exists(target_path):
                     return jsonify([])
-
-        mtime = os.path.getmtime(target_path)
-        cache = _get_shortlist_cache()
-        if cache["mtime"] == mtime and cache["payload"] is not None:
-            return Response(cache["payload"], mimetype="application/json")
 
         import pandas as pd
         import json
@@ -2418,10 +2420,36 @@ def api_shortlist():
             
         df = df.replace([float('inf'), float('-inf')], float('nan'))
         df = df.where(pd.notnull(df), None)
-        records = sanitize_nans(df.to_dict(orient="records"))
-        payload = json.dumps(records)
-        cache["mtime"] = mtime
-        cache["payload"] = payload
+        records = df.to_dict(orient="records")
+
+        # [RULE 67 CHANGE-RATIONALE: LIVE_WATCHLIST_CMP_ENRICHMENT_v1.0]
+        # Dynamically attach live CMP quotes to the fundamental watchlist so that market-hour price movements are visible.
+        sym_list = [r.get("Stock") or r.get("symbol") or r.get("Symbol") for r in records if (r.get("Stock") or r.get("symbol") or r.get("Symbol"))]
+        if sym_list:
+            try:
+                from master_orchestrator import orchestrator_v2
+                batch_cmps = orchestrator_v2._batch_resolve_cmps(sym_list)
+                for r in records:
+                    s = r.get("Stock") or r.get("symbol") or r.get("Symbol")
+                    if s:
+                        clean_s = str(s).split(":")[-1].strip().upper().replace(".NS", "").replace(".BO", "")
+                        cmp_val = batch_cmps.get(s) or batch_cmps.get(clean_s)
+                        if cmp_val and float(cmp_val) > 0:
+                            cmp_f = round(float(cmp_val), 2)
+                            r["cmp"] = cmp_f
+                            r["current_price"] = cmp_f
+                            r["latest_price"] = cmp_f
+                            # Calculate live change % if previous close / EOD price is available
+                            prev_p = r.get("Price") or r.get("close") or r.get("Close")
+                            if prev_p and float(prev_p) > 0:
+                                r["live_change_pct"] = round(((cmp_f - float(prev_p)) / float(prev_p)) * 100.0, 2)
+            except Exception as cmp_err:
+                logger.debug(f"Watchlist live CMP enrichment warning: {cmp_err}")
+
+        clean_records = sanitize_nans(records)
+        payload = json.dumps(clean_records)
+        _SHORTLIST_MEMO_CACHE["ts"] = now_ts
+        _SHORTLIST_MEMO_CACHE["payload"] = payload
         return Response(payload, mimetype="application/json")
     except Exception as e:
         logger.exception(f"Failed to load shortlist JSON")

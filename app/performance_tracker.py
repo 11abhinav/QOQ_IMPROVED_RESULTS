@@ -1012,8 +1012,14 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
             watchlist_symbols = set()
             with get_connection() as _wconn:
                 with _wconn.cursor() as _wcur:
-                    _wcur.execute("SELECT DISTINCT symbol FROM user_watchlists WHERE symbol IS NOT NULL AND symbol != ''")
-                    watchlist_symbols = {r[0] for r in _wcur.fetchall()}
+                    _wcur.execute("""
+                        SELECT DISTINCT symbol FROM user_watchlists WHERE symbol IS NOT NULL AND symbol != ''
+                        UNION
+                        SELECT DISTINCT symbol FROM breakout_watchlist WHERE is_active = TRUE AND symbol IS NOT NULL
+                        UNION
+                        SELECT DISTINCT symbol FROM daily_watchlist_v2 WHERE build_date = (SELECT MAX(build_date) FROM daily_watchlist_v2) AND symbol IS NOT NULL
+                    """)
+                    watchlist_symbols = {r[0] for r in _wcur.fetchall() if r[0]}
             # Symbols already in current_prices → reuse; new ones → fetch live
             extra_syms = list(watchlist_symbols - set(unique_symbols))
             if extra_syms:
@@ -1023,7 +1029,7 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
                 all_cmp = {sym: current_prices[sym] for sym in watchlist_symbols if sym in current_prices}
             if all_cmp:
                 bulk_update_cmp(all_cmp)
-                logger.info(f"💰 [CMP_MASTER] Updated CMP for {len(all_cmp)} watchlist symbols in stock_analysis_master")
+                logger.info(f"💰 [CMP_MASTER] Updated CMP for {len(all_cmp)} universe/watchlist symbols in stock_analysis_master")
         except Exception as _cmp_err:
             logger.warning(f"⚠️ [CMP_MASTER] Could not update watchlist CMP: {_cmp_err}")
 
@@ -1099,16 +1105,20 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
         alert_time = t["alert_time"]
         scanner    = t.get("scanner", "")
 
-        # Long-term compounder positions (MULTIBAGGER, WEALTH) are managed exclusively
-        # by their own fundamental exit monitors (e.g. evaluate_multibagger_exits).
-        # Skip swing SL / target processing for them in performance_tracker.
-        if scanner in ("MULTIBAGGER", "WEALTH", "Wealth Engine"):
-            continue
-
+        # Attach real-time CMP for ALL trades (including MULTIBAGGER and WEALTH)
         cur_p = current_prices.get(sym)
         if cur_p is not None and cur_p > 0:
             t["current_price"] = round(cur_p, 2)
             if not t["_db_closed"]:
+                # Calculate live unrealized P&L
+                if ep and ep > 0:
+                    live_pnl_pct = round(((cur_p - ep) / ep) * 100.0, 2)
+                    t["pnl_pct"] = live_pnl_pct
+                    sh_b = t.get("shares_bought") or 0
+                    if sh_b > 0:
+                        t["pnl_rs"] = round((cur_p - ep) * sh_b, 2)
+                    elif t.get("capital_allocated"):
+                        t["pnl_rs"] = round((live_pnl_pct / 100.0) * float(t["capital_allocated"]), 2)
                 try:
                     from database import update_alert_current_price
                     update_alert_current_price(t["id"], cur_p)
@@ -1128,6 +1138,16 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
 
         # ── Already closed in DB — no bar download needed ────────────────────────
         if t["_db_closed"]:
+            # pnl_pct and exit_price already populated from DB above
+            # Just refresh current_price for display; status stays locked
+            logger.debug(f"⏭️  {sym} already closed ({t['status']}) — skipping bar fetch")
+            continue
+
+        # Long-term compounder positions (MULTIBAGGER, WEALTH) are managed exclusively
+        # by their own fundamental exit monitors (e.g. evaluate_multibagger_exits).
+        # Skip swing SL / target processing for them in performance_tracker.
+        if scanner in ("MULTIBAGGER", "WEALTH", "Wealth Engine"):
+            continue
             # pnl_pct and exit_price already populated from DB above
             # Just refresh current_price for display; status stays locked
             logger.debug(f"⏭️  {sym} already closed ({t['status']}) — skipping bar fetch")

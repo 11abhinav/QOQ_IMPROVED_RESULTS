@@ -4393,6 +4393,10 @@ def get_todays_alerts(today_str: str) -> list[dict]:
                 cur.execute("""
                     SELECT a.id, a.symbol, a.breakout_type, a.alert_time::text as alert_time, a.scanner, a.category, a.entry_price,
                         a.stop_loss, a.initial_stop_loss, a.target_1, a.target_2, a.target_3, a.target_4, a.target_price, a.remaining_shares, a.signals, a.score::int as score, a.status, a.seen_by_user, a.seen_by_admin, a.is_rejected, a.exit_signal,
+                        COALESCE(a.current_price, a.entry_price)                 AS current_price,
+                        COALESCE(a.pnl_pct, 0.0)                                 AS pnl_pct,
+                        COALESCE(a.pnl_rs, 0.0)                                  AS pnl_rs,
+                        a.exit_price,
                         -- [VERSION: EARNINGS_BADGE_v1.0] Earnings fields from alerts table (populated at alert creation time)
                         COALESCE(a.earnings_flag, FALSE)                         AS earnings_flag,
                         COALESCE(a.days_to_earnings, 999)                        AS days_to_earnings,
@@ -4410,18 +4414,22 @@ def get_todays_alerts(today_str: str) -> list[dict]:
                     SELECT w.id, w.symbol, w.breakout_type, w.alert_time::text as alert_time, w.breakout_type as scanner, w.portfolio_bucket as category, w.alert_price as entry_price,
                         NULL::real as stop_loss, NULL::real as initial_stop_loss, NULL::real as target_1, NULL::real as target_2, NULL::real as target_3, NULL::real as target_4, NULL::real as target_price, NULL::int as remaining_shares, w.entry_signal as signals, w.fm_score::int as score,
                         CASE WHEN w.is_closed THEN 'CLOSED' ELSE 'OPEN' END as status, FALSE as seen_by_user, FALSE as seen_by_admin, FALSE as is_rejected, w.exit_signal,
-                         FALSE                                                    AS earnings_flag,
-                         999                                                      AS days_to_earnings,
-                         NULL::DATE                                               AS earnings_date,
-                         'NONE'::TEXT                                             AS earnings_severity,
-                         ''                                                       AS warning_msg,
-                         'INITIAL'::TEXT                                          AS trade_evolution_state,
-                         1::INT                                                   AS evidence_count,
-                         1::INT                                                   AS distinct_patterns_count,
-                         'INITIAL'::TEXT                                          AS confirmation_quality,
-                         'NEW_ENTRY'::TEXT                                        AS last_event_type
-                     FROM wealth_buy_alert w
-                     WHERE w.alert_date = %s
+                        COALESCE(w.alert_price, 0.0)                             AS current_price,
+                        0.0                                                      AS pnl_pct,
+                        0.0                                                      AS pnl_rs,
+                        NULL::real                                               AS exit_price,
+                        FALSE                                                    AS earnings_flag,
+                        999                                                      AS days_to_earnings,
+                        NULL::DATE                                               AS earnings_date,
+                        'NONE'::TEXT                                             AS earnings_severity,
+                        ''                                                       AS warning_msg,
+                        'INITIAL'::TEXT                                          AS trade_evolution_state,
+                        1::INT                                                   AS evidence_count,
+                        1::INT                                                   AS distinct_patterns_count,
+                        'INITIAL'::TEXT                                          AS confirmation_quality,
+                        'NEW_ENTRY'::TEXT                                        AS last_event_type
+                    FROM wealth_buy_alert w
+                    WHERE w.alert_date = %s
                     ORDER BY alert_time DESC
                 """, (today_str, today_str))
                 return [dict(row) for row in cur.fetchall()]
