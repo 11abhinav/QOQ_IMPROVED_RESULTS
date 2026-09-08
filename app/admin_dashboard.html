@@ -202,11 +202,14 @@ function changeAdminPage(type, delta) {
       font-family: var(--font-body);
       font-size: 14px;
       min-height: 100vh;
-      overflow-x: auto;
+      overflow-x: hidden;
+      width: 100%;
+      max-width: 100vw;
+      box-sizing: border-box;
       -webkit-font-smoothing: antialiased;
     }
 
-    html { overflow-x: auto; }
+    html { overflow-x: hidden; width: 100%; }
 
     /* ── SCROLLBAR ── */
     ::-webkit-scrollbar { width: 7px; height: 7px; }
@@ -819,15 +822,17 @@ function changeAdminPage(type, delta) {
     }
 
     /* Table wrapper */
+    /* [RULE 67 CHANGE-RATIONALE]: Ensure table wrapper and table fit on screen without cutting off right-side columns (Score, Days) */
     .tbl-wrap {
       overflow-x: auto;
       overflow-y: auto;
       max-height: calc(100vh - 180px);
       scrollbar-width: thin;
       scrollbar-color: var(--border2) var(--card2);
+      width: 100%;
     }
 
-    table { width: 100%; min-width: 1200px; border-collapse: collapse; font-size: 13px; }
+    table { width: 100%; min-width: 100%; border-collapse: collapse; font-size: 12px; }
 
     thead th {
       position: sticky;
@@ -838,8 +843,8 @@ function changeAdminPage(type, delta) {
       font-size: 10px;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: .6px;
-      padding: 6px 8px;
+      letter-spacing: .4px;
+      padding: 6px 6px;
       text-align: left;
       border-bottom: 1px solid var(--border);
       white-space: nowrap;
@@ -857,10 +862,10 @@ function changeAdminPage(type, delta) {
     tbody tr:hover { background: var(--card2); }
 
     tbody td {
-      padding: 5px 8px;
+      padding: 5px 6px;
       white-space: nowrap;
       font-family: var(--font-mono);
-      font-size: 12px;
+      font-size: 11.5px;
       color: var(--text);
     }
 
@@ -968,10 +973,10 @@ function changeAdminPage(type, delta) {
     /* ─────────────────────────────────────────
        PNL BAR
     ───────────────────────────────────────── */
-    .pnl-wrap { display: flex; align-items: center; gap: 8px; }
-    .pnl-bar-track { width: 48px; height: 4px; background: var(--card3); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
+    .pnl-wrap { display: flex; align-items: center; gap: 6px; }
+    .pnl-bar-track { width: 36px; height: 4px; background: var(--card3); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
     .pnl-bar-fill  { height: 100%; border-radius: 2px; transition: width .3s; }
-    .pnl-text      { font-family: var(--font-mono); font-size: 12px; font-weight: 700; min-width: 56px; }
+    .pnl-text      { font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; min-width: 48px; }
 
     /* ─────────────────────────────────────────
        EXPAND ROWS
@@ -1018,9 +1023,9 @@ function changeAdminPage(type, delta) {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 30px; height: 30px;
+      width: 26px; height: 26px;
       border-radius: 50%;
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 700;
       font-family: var(--font-mono);
       border: 2px solid;
@@ -1289,6 +1294,15 @@ function changeAdminPage(type, delta) {
     /* ─────────────────────────────────────────
        RESPONSIVE
     ───────────────────────────────────────── */
+    @media(max-width: 1400px) {
+      /* [RULE 67 CHANGE-RATIONALE]: Ensure all trade table columns fit onto laptop/smaller desktop displays by hiding secondary optional columns and compacting paddings */
+      thead th, tbody td { padding: 4px 4px !important; font-size: 11px !important; }
+      .col-opt { display: none !important; }
+      .pnl-wrap { gap: 4px !important; }
+      .pnl-bar-track { width: 30px !important; }
+      .pnl-text { min-width: 42px !important; font-size: 10.5px !important; }
+    }
+
     @media(max-width: 1024px) {
       .kpi-row .kpi { flex: 1 1 calc(50% - 5px); }
     }

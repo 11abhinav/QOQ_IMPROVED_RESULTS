@@ -208,19 +208,23 @@ var USER_PAGE_SIZE = 10;
   .filter-bar select,.filter-bar input{background:var(--card2);border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:var(--radius);font-size:12px;font-family:var(--font-mono);outline:none;transition:border-color .15s,box-shadow .15s;}
   .filter-bar select:focus,.filter-bar input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim);}
   .filter-bar select option{background:var(--card);color:var(--text);}
-  .tbl-wrap{overflow-x:auto;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border2) var(--card2);}
-  table{width:100%;min-width:1100px;border-collapse:collapse;font-size:13px;}
-  thead th{background:var(--card2);color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;padding:6px 6px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;transition:color .15s;}
+  /* [RULE 67 CHANGE-RATIONALE]: Set table min-width to 100% and optimize padding to fit alert table cleanly on screen without horizontal cut-off */
+  .tbl-wrap{overflow-x:auto;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border2) var(--card2);width:100%;}
+  table{width:100%;min-width:100%;border-collapse:collapse;font-size:12px;}
+  thead th{background:var(--card2);color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:6px 6px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none;transition:color .15s;}
   thead th:hover{color:var(--text);}
   thead th.sort-asc::after{content:' ▲';color:var(--accent);font-size:8px;}
   thead th.sort-desc::after{content:' ▼';color:var(--accent);font-size:8px;}
   tbody tr{border-bottom:1px solid var(--border);transition:background .08s;}
   tbody tr:last-child{border-bottom:none;}
   tbody tr:hover{background:var(--card2);}
-  tbody td{padding:5px 6px;white-space:nowrap;font-family:var(--font-mono);font-size:12px;color:var(--text);}
-  @media(max-width: 1280px) {
-    thead th, tbody td { padding: 6px 6px !important; font-size: 11px !important; }
+  tbody td{padding:5px 6px;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;color:var(--text);}
+  @media(max-width: 1400px) {
+    thead th, tbody td { padding: 4px 4px !important; font-size: 11px !important; }
     .col-opt { display: none !important; }
+    .pnl-wrap { gap: 4px !important; }
+    .pnl-bar-track { width: 30px !important; }
+    .pnl-text { min-width: 42px !important; font-size: 10.5px !important; }
   }
   .badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:10px;font-weight:700;letter-spacing:.3px;font-family:var(--font-mono);}
   .badge-win{background:rgba(5,150,105,.1);color:#059669;border:1px solid rgba(5,150,105,.2);}
@@ -230,10 +234,10 @@ var USER_PAGE_SIZE = 10;
   .badge-neutral{background:var(--card3);color:var(--muted);border:1px solid var(--border2);}
   .badge-scanner{background:rgba(217,119,6,.1);color:var(--amber);font-family:var(--font-mono);border:1px solid rgba(217,119,6,.2);}
   .pos{color:var(--win);} .neg{color:var(--loss);} .flat{color:var(--muted);}
-  .pnl-wrap{display:flex;align-items:center;gap:8px;}
-  .pnl-bar-track{width:48px;height:4px;background:var(--card3);border-radius:2px;overflow:hidden;flex-shrink:0;}
+  .pnl-wrap{display:flex;align-items:center;gap:6px;}
+  .pnl-bar-track{width:36px;height:4px;background:var(--card3);border-radius:2px;overflow:hidden;flex-shrink:0;}
   .pnl-bar-fill{height:100%;border-radius:2px;transition:width .3s;}
-  .pnl-text{font-family:var(--font-mono);font-size:12px;font-weight:700;min-width:56px;}
+  .pnl-text{font-family:var(--font-mono);font-size:11.5px;font-weight:700;min-width:48px;}
   tbody tr.main-row{cursor:pointer;}
   tbody tr.main-row td:first-child{color:var(--muted2);font-size:10px;width:20px;text-align:center;transition:.15s;}
   tbody tr.main-row.open td:first-child{color:var(--accent);}

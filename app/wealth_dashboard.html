@@ -182,7 +182,8 @@
     overflow-x: auto; margin-bottom: 32px; box-shadow: var(--shadow);
     scrollbar-width: thin; scrollbar-color: var(--border2) var(--card2);
   }
-  table { width: 100%; min-width: 900px; border-collapse: collapse; text-align: left; font-size: 13px; }
+  /* [RULE 67 CHANGE-RATIONALE]: Ensure wealth dashboard table scales fluidly across all screen viewports */
+  table { width: 100%; min-width: 100%; border-collapse: collapse; text-align: left; font-size: 12.5px; }
   th, td { padding: 11px 12px; white-space: nowrap; }
   th { background: var(--card2); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; border-bottom: 1px solid var(--border); cursor: pointer; transition: color .15s; }
   th:hover { color: var(--text); }
