@@ -32,11 +32,11 @@ from app.short_covering.short_covering_schema import (
 )
 try:
     from app.lock_utils import ProcessLock
-    from app.database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
+    from app.database import get_connection, upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
     from app.trading_calendar import get_latest_trading_date, get_previous_trading_date, is_trading_day
 except ImportError:
     from lock_utils import ProcessLock
-    from database import upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
+    from database import get_connection, upsert_scanner_health, start_scanner_execution_run, complete_scanner_execution_run
     from trading_calendar import get_latest_trading_date, get_previous_trading_date, is_trading_day
 
 logger = logging.getLogger(__name__)
@@ -520,6 +520,10 @@ class ShortCoveringEarlyIgnitionScanner:
         candidates = []
         if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
             try:
+                try:
+                    from app.database import get_connection
+                except ImportError:
+                    from database import get_connection
                 from psycopg2.extras import RealDictCursor
                 with get_connection(timeout=1) as conn:
                     if hasattr(conn, "is_dummy") and conn.is_dummy:

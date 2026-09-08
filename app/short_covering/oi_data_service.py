@@ -133,7 +133,10 @@ class OIDataService:
         # Attempt DB fetch from daily_fo_bhavcopy if available and configured
         if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
             try:
-                from app.database import get_connection
+                try:
+                    from app.database import get_connection
+                except ImportError:
+                    from database import get_connection
                 from psycopg2.extras import RealDictCursor
                 with get_connection(timeout=1) as conn:
                     if not hasattr(conn, "is_dummy") or not conn.is_dummy:

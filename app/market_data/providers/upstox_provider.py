@@ -476,14 +476,17 @@ class UpstoxProvider(ProviderInterface):
         }
 
         results = {}
-        chunk_size = 500
+        chunk_size = 200
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i:i + chunk_size]
 
             # [PHASE1_DIAG] Stage A: Instrument Key Resolution
             _t_res = time.perf_counter()
-            formatted_keys_list = [urllib.parse.quote(self._get_instrument_key(s)) for s in chunk]
+            formatted_keys_list = [urllib.parse.quote(self._get_instrument_key(s)) for s in chunk if s and self._get_instrument_key(s)]
             resolution_ms = (time.perf_counter() - _t_res) * 1000
+
+            if not formatted_keys_list:
+                continue
 
             formatted_keys = ",".join(formatted_keys_list)
             url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={formatted_keys}"
@@ -530,7 +533,7 @@ class UpstoxProvider(ProviderInterface):
                         if matched_quote:
                             results[orig_sym] = matched_quote
                 else:
-                    logger.error(f"Failed live quote batch fetch (Status {res.status_code})")
+                    logger.error(f"Failed live quote batch fetch (Status {res.status_code}): {res.text[:200] if res.text else ''}")
                 merge_ms = (time.perf_counter() - _t_merge) * 1000
 
                 # [PHASE1_DIAG] Redundant-call detection: warn if calls exceed requested symbols
