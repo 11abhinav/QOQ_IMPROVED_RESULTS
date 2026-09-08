@@ -134,6 +134,7 @@ class OIDataService:
         if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
             try:
                 from app.database import get_connection
+                from psycopg2.extras import RealDictCursor
                 with get_connection(timeout=1) as conn:
                     if not hasattr(conn, "is_dummy") or not conn.is_dummy:
                         with conn.cursor() as cur:
@@ -146,8 +147,9 @@ class OIDataService:
                                 """
                             )
                             table_exists = cur.fetchone()
-                            if table_exists and table_exists[0]:
-                                cur.execute(
+                        if table_exists and table_exists[0]:
+                            with conn.cursor(cursor_factory=RealDictCursor) as r_cur:
+                                r_cur.execute(
                                     """
                                     SELECT trade_date as date, close, open, high, low, volume, total_oi, oi_change
                                     FROM daily_fo_bhavcopy
@@ -156,7 +158,7 @@ class OIDataService:
                                     """,
                                     (symbol, as_of, lookback_days)
                                 )
-                                rows = cur.fetchall()
+                                rows = [dict(r) for r in r_cur.fetchall()]
                                 if rows and len(rows) >= 5:
                                     df = pd.DataFrame(rows)
                                     df = df.sort_values("date").reset_index(drop=True)

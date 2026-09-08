@@ -510,11 +510,11 @@ class ShortCoveringEarlyIgnitionScanner:
         candidates = []
         if os.getenv("DATABASE_URL") and not os.getenv("DISABLE_DB_OI_LOOKUP"):
             try:
-                from app.database import get_connection
+                from psycopg2.extras import RealDictCursor
                 with get_connection(timeout=1) as conn:
                     if hasattr(conn, "is_dummy") and conn.is_dummy:
                         return []
-                    with conn.cursor() as cur:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         # RULE 67 RATIONALE: Only select candidates matching the most recent session on/before target_date
                         # to ensure stale entries from older sessions are never intermingled.
                         cur.execute("""
@@ -527,19 +527,19 @@ class ShortCoveringEarlyIgnitionScanner:
                             candidates.append(EODShortPositionCandidate(
                                 symbol=r["symbol"],
                                 scan_date=r["scan_date"],
-                                close_price=float(r["close_price"] or 0),
-                                total_oi=int(r["total_oi"] or 0),
-                                oi_change_pct_1d=float(r["oi_change_pct_1d"] or 0),
-                                oi_buildup_5d_pct=float(r["oi_buildup_5d_pct"] or 0),
-                                oi_buildup_10d_pct=float(r["oi_buildup_5d_pct"] or 0),
-                                short_buildup_ratio=float(r["short_buildup_ratio"] or 0.6),
-                                rsi_14=float(r["rsi_14"] or 40.0),
-                                support_level=float(r["support_level"] or 0),
-                                overhead_resistance=float(r["overhead_resistance"] or 0),
-                                atr_14=float(r["atr_14"] or 0),
+                                close_price=float(r.get("close_price") or 0),
+                                total_oi=int(r.get("total_oi") or 0),
+                                oi_change_pct_1d=float(r.get("oi_change_pct_1d") or 0),
+                                oi_buildup_5d_pct=float(r.get("oi_buildup_5d_pct") or 0),
+                                oi_buildup_10d_pct=float(r.get("oi_buildup_10d_pct") or r.get("oi_buildup_5d_pct") or 0),
+                                short_buildup_ratio=float(r.get("short_buildup_ratio") or 0.6),
+                                rsi_14=float(r.get("rsi_14") or 40.0),
+                                support_level=float(r.get("support_level") or 0),
+                                overhead_resistance=float(r.get("overhead_resistance") or 0),
+                                atr_14=float(r.get("atr_14") or 0),
                                 daily_volume=1_000_000,
-                                sector=r["sector"] or "GENERAL",
-                                buildup_quality_score=float(r["buildup_quality_score"] or 70.0),
+                                sector=r.get("sector") or "GENERAL",
+                                buildup_quality_score=float(r.get("buildup_quality_score") or 70.0),
                                 reasons=["Loaded from Layer 1 EOD watchlist"]
                             ))
             except Exception as e:
