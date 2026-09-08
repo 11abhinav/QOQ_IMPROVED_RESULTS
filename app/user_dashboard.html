@@ -1423,10 +1423,10 @@ function buildTradeRows(trades, maxAbs, prefix) {
       <td style="color:var(--muted);font-family:var(--font-mono);font-size:11px">${fmtAlertTime(t.alert_time||t.entry_date)}</td>
       <td>
         <span class="badge badge-scanner">${t.scanner||'—'}</span>
-        ${t.signals ? `<div style="font-size:9px; color:var(--accent); font-weight:600; margin-top:2px;">${(t.signals).replace(/_/g, ' ')}</div>` : ''}
+        ${t.scanner === 'TECHNICAL' && t.signals ? `<div style="font-size:9px; color:var(--accent); font-weight:600; margin-top:2px;">${(t.signals).replace(/_/g, ' ')}</div>` : ''}
       </td>
       <td>${badgeHtml(t.status, t)}</td>
-      <td class="col-opt" style="color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-body)">${(t.category||t.signals||'—').replace(/_/g, ' ')}</td>
+      <td class="col-opt" style="color:var(--muted);max-width:140px;overflow:hidden;text-overflow:ellipsis;font-family:var(--font-body)">${t.category||'—'}</td>
       <td style="text-align:center;"><button onclick="openChart('${t.symbol}', ${t.current_price || t.entry_price}); event.stopPropagation();" style="background:var(--card2); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer;" title="View Chart">📈</button></td>
       <td>
         <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 2px;">Trig: ${fmt(t.entry_price)}</div>
@@ -1451,10 +1451,11 @@ function buildTradeRows(trades, maxAbs, prefix) {
     <tr class="detail-row">
       <td colspan="15">
         <div class="detail-panel ${isOpen?'open':'closed'}" id="dp-${id}">
+          ${t.scanner === 'TECHNICAL' ? `
           <div class="detail-item">
-            <div class="detail-label">Pattern / Signal</div>
-            <div class="detail-val" style="color:var(--accent);font-weight:700;">${(t.signals || t.category || '—').replace(/_/g, ' ')}</div>
-          </div>
+            <div class="detail-label">Pattern Passed</div>
+            <div class="detail-val" style="color:var(--accent);font-weight:700;">${(t.signals || t.category || 'TECHNICAL').replace(/_/g, ' ')}</div>
+          </div>` : ''}
           <div class="detail-item">
             <div class="detail-label">Stop Loss</div>
             <div class="detail-val neg">${fmt(t.stop_loss)}</div>
