@@ -10149,6 +10149,8 @@ def get_scanner_execution_history(
                                 expanded_sc_list.extend(["MULTI_TF", "MULTI_TF_5M"])
                             elif u in ["MULTIBAGGER"]:
                                 expanded_sc_list.extend(["MULTIBAGGER", "MULTIBAGGER_EXIT"])
+                            elif u in ["SHORT_COVERING", "SHORTCOVERING"]:
+                                expanded_sc_list.extend(["SHORT_COVERING", "SHORT_COVERING_5M", "SHORT_COVERING_EOD"])
                         sc_list = list(dict.fromkeys(expanded_sc_list))
                         if len(sc_list) == 1:
                             where_clauses.append("UPPER(scanner_name) = UPPER(%s)")

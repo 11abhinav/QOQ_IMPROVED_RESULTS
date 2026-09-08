@@ -143,6 +143,16 @@ class ShortCoveringEarlyIgnitionScanner:
 
         start_t = time.monotonic()
         _SCHEDULE_STR = "Every 5m (09:20 - 15:25 IST Market Days)"
+
+        # [RULE 67 CHANGE-RATIONALE] Notify health monitor immediately that 5M scanner is actively RUNNING
+        upsert_scanner_health(
+            scanner_name="SHORT_COVERING_5M",
+            status="RUNNING",
+            error_msg="5m short-covering ignition scan in progress...",
+            scheduled_for=_SCHEDULE_STR,
+            run_id=run_ctx.run_id if run_ctx else None
+        )
+
         try:
             # 1. Check Watchlist Freshness Guard
             is_fresh, max_date, expected_date = self.check_watchlist_freshness(today)
