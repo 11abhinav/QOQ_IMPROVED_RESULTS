@@ -1846,18 +1846,24 @@ def _run_wealth_scan_wrapper(is_test_mode=False, run_ctx=None, session=None):
         BATCH_SIZE = int(os.environ.get("WEALTH_BATCH_SIZE", "200"))
         logger.info(f"💰 [WEALTH ENGINE] Processing {len(all_symbols_to_fetch)} symbols in chunks of {BATCH_SIZE}...")
 
+        prefetched_peer_medians = {}
         if all_symbols_to_fetch:
             from valuation_utils import compute_peer_medians
             prefetch_symbols = list(all_symbols_to_fetch)
 
+            # [RULE 67 CHANGE-RATIONALE: BACKGROUND_PEER_MEDIANS_REUSE_v1.0]
+            # Store background worker results into prefetched_peer_medians container so the
+            # main thread reuses it directly rather than throwing it away and re-computing.
             def prefetch_medians():
                 t_name = threading.current_thread().name
                 try:
                     logger.info(f"🚀 [BACKGROUND WORKER START] Worker='{t_name}' | InitiatedBy='WealthEngineMain' | Action='Pre-fetching sector peer medians for {len(prefetch_symbols)} symbols'")
                     _t_start = time.perf_counter()
                     res = compute_peer_medians(prefetch_symbols)
+                    if res and isinstance(res, dict):
+                        prefetched_peer_medians.update(res)
                     dur_s = time.perf_counter() - _t_start
-                    logger.info(f"✅ [BACKGROUND WORKER COMPLETE] Worker='{t_name}' | Action='Pre-fetch peer medians' | SymbolsProcessed={len(res)} | Duration={dur_s:.2f}s")
+                    logger.info(f"✅ [BACKGROUND WORKER COMPLETE] Worker='{t_name}' | Action='Pre-fetch peer medians' | SymbolsProcessed={len(res or {})} | Duration={dur_s:.2f}s")
                 except Exception as ex:
                     logger.warning(f"⚠️ [BACKGROUND WORKER FAIL] Worker='{t_name}' | Action='Pre-fetch peer medians' | Error={ex}")
 
@@ -2251,12 +2257,19 @@ def _run_wealth_scan_wrapper(is_test_mode=False, run_ctx=None, session=None):
 
         if peer_medians_thread is not None:
             logger.info("⏱ [WEALTH ENGINE] Waiting for background peer medians thread to complete...")
-            peer_medians_thread.join(timeout=1.0) # [PERF OPT] Reduced from 180s to 15s to prevent long scanner stalls
+            peer_medians_thread.join(timeout=15.0) # [RULE 67: Wait up to 15s for background worker to complete]
             if peer_medians_thread.is_alive():
                 logger.warning("⚠️ [WEALTH ENGINE] Background peer medians thread timed out after 15s. Continuing with cached/available data.")
 
-        from valuation_utils import compute_peer_medians
-        sector_stats = compute_peer_medians(wealth_df["Stock"].tolist() if not wealth_df.empty else [])
+        # [RULE 67 CHANGE-RATIONALE: REUSE_PREFETCHED_PEER_MEDIANS_v1.0]
+        # If background worker finished, reuse its result immediately (<1ms) instead of executing
+        # a duplicate synchronous fetch across 5000 stocks on the main thread.
+        if prefetched_peer_medians:
+            logger.info(f"⚡ [WEALTH ENGINE] Reusing {len(prefetched_peer_medians)} pre-fetched sector peer medians from background worker (<1ms).")
+            sector_stats = prefetched_peer_medians
+        else:
+            from valuation_utils import compute_peer_medians
+            sector_stats = compute_peer_medians(wealth_df["Stock"].tolist() if not wealth_df.empty else [])
 
         wealth_df = evaluate_candidates(wealth_df, sector_stats, nifty_dist_52w)
 

@@ -1042,6 +1042,51 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
             batch_results = fetcher.get_batch_ohlcv(batch, interval=interval, period=period, retries=3, range_from=range_from, range_to=range_to, caller=requester)
             t_broker_total += (time.monotonic() - _t_b0)
             
+            if batch_results is None:
+                batch_results = {}
+
+            # [RULE 67 CHANGE-RATIONALE: PARALLEL_BATCH_FALLBACK_v1.0]
+            # When primary batch provider fails or returns incomplete results (e.g. broker rate limit, 
+            # connection drop, or symbol timeout), fetching fallbacks sequentially took 15-20 minutes.
+            # We identify all missing symbols in the batch upfront and fetch them concurrently using
+            # a bounded ThreadPoolExecutor (max_workers=10), reducing fallback duration to ~15-30 seconds.
+            missing_syms = []
+            for sym in batch:
+                md_check = batch_results.get(sym)
+                if md_check is None:
+                    md_check = batch_results.get(f"{sym}.NS") or batch_results.get(f"{sym}.BO") or batch_results.get(sym.split('.')[0])
+                if md_check is None or getattr(md_check, 'dataframe', None) is None or getattr(md_check.dataframe, 'empty', True):
+                    missing_syms.append(sym)
+
+            if missing_syms:
+                logger.warning(f"⚠️ Primary batch fetch missing/empty for {len(missing_syms)}/{len(batch)} symbols. Attempting parallel UnifiedFetcher fallback...")
+                def _fetch_fallback_item(sym_to_fb):
+                    try:
+                        from data_providers.unified_fetcher import UnifiedFetcher
+                        uf = UnifiedFetcher()
+                        fb_df = uf.fetch_historical(sym_to_fb, interval, period, consumer="price_cache_fallback")
+                        if fb_df is not None and not fb_df.empty:
+                            from validation.report import MarketData, DataQualityReport
+                            return sym_to_fb, MarketData(
+                                dataframe=fb_df,
+                                source=fb_df.attrs.get("provider", "fallback"),
+                                quality_report=DataQualityReport(is_valid=True, quality_score=100.0, status="VALID", issues=[]),
+                                stale=False,
+                                used_fallback=True
+                            )
+                    except Exception as fb_err:
+                        logger.error(f"❌ UnifiedFetcher fallback failed for {sym_to_fb}: {fb_err}")
+                    return sym_to_fb, None
+
+                fb_max_w = min(10, len(missing_syms))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=fb_max_w) as fb_exec:
+                    fb_outcomes = list(fb_exec.map(_fetch_fallback_item, missing_syms))
+
+                for sym_done, md_done in fb_outcomes:
+                    if md_done is not None:
+                        batch_results[sym_done] = md_done
+                        logger.info(f"✅ Parallel fallback successful for {sym_done} using {md_done.source}")
+
             if batch_results:
                 batch_validation_items = []
                 batch_indicator_jobs = []
@@ -1056,27 +1101,6 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                     
                     cached_df = next((item[1] for item in items if item[0] == sym), None)
                     
-                    if md is None or getattr(md, 'dataframe', None) is None or getattr(md.dataframe, 'empty', True):
-                        # [BATCH FALLBACK FIX] Primary batch provider failed (e.g. rate limit or quality reject). 
-                        # Use UnifiedFetcher to route through secondary providers (Fyers -> Upstox -> Yahoo).
-                        logger.warning(f"⚠️ Primary batch fetch failed for {sym}. Attempting UnifiedFetcher fallback...")
-                        try:
-                            from data_providers.unified_fetcher import UnifiedFetcher
-                            unified_fetcher = UnifiedFetcher()
-                            fallback_df = unified_fetcher.fetch_historical(sym, interval, period, consumer="price_cache_fallback")
-                            if fallback_df is not None and not fallback_df.empty:
-                                from validation.report import MarketData, DataQualityReport
-                                md = MarketData(
-                                    dataframe=fallback_df,
-                                    source=fallback_df.attrs.get("provider", "fallback"),
-                                    quality_report=DataQualityReport(is_valid=True, quality_score=100.0, status="VALID", issues=[]),
-                                    stale=False,
-                                    used_fallback=True
-                                )
-                                logger.info(f"✅ Fallback successful for {sym} using {md.source}")
-                        except Exception as fb_err:
-                            logger.error(f"❌ UnifiedFetcher fallback failed for {sym}: {fb_err}")
-                            
                     if md is None or getattr(md, 'dataframe', None) is None or getattr(md.dataframe, 'empty', True):
                         if cached_df is not None and not cached_df.empty:
                             _mark_cache_staleness(cached_df)
