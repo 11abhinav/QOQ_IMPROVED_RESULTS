@@ -964,26 +964,26 @@ def _find_valid_window(df: pd.DataFrame, atr_15m: float, config: Dict[str, Any])
 
 def _build_geometry(df: pd.DataFrame, atr_15m: float, res: ConsolidationResult, config: Dict[str, Any]):
     """Calculates adaptive base geometry, structural resistance, and occupancy."""
-    highs = df["High"].astype(float)
-    lows = df["Low"].astype(float)
-    closes = df["Close"].astype(float)
+    highs = df["High"].values.astype(float)
+    lows = df["Low"].values.astype(float)
+    closes = df["Close"].values.astype(float)
 
     q_high = config.get("BOX_HIGH_QUANTILE", 0.90)
     q_low = config.get("BOX_LOW_QUANTILE", 0.10)
 
-    res.hard_high = float(highs.max())
-    res.hard_low = float(lows.min())
+    res.hard_high = float(np.max(highs))
+    res.hard_low = float(np.min(lows))
 
     # Structural resistance uses the top high or 90th percentile to avoid single wick distortion
-    res.box_high = float(highs.quantile(q_high)) if len(df) >= 6 else res.hard_high
-    res.box_low = float(lows.quantile(q_low)) if len(df) >= 6 else res.hard_low
+    res.box_high = float(np.percentile(highs, q_high * 100)) if len(highs) >= 6 else res.hard_high
+    res.box_low = float(np.percentile(lows, q_low * 100)) if len(lows) >= 6 else res.hard_low
 
     # Ensure box_high never falls below median close
-    med_close = float(closes.median())
+    med_close = float(np.median(closes))
     if res.box_high < med_close:
-        res.box_high = float(highs.max())
+        res.box_high = float(np.max(highs))
     if res.box_low > med_close:
-        res.box_low = float(lows.min())
+        res.box_low = float(np.min(lows))
 
     res.box_mid = (res.box_high + res.box_low) / 2.0
     res.box_value_center = med_close
@@ -992,10 +992,10 @@ def _build_geometry(df: pd.DataFrame, atr_15m: float, res: ConsolidationResult, 
     res.box_width_pct = (res.box_high - res.box_low) / eff_mid
     res.box_width_atr = (res.box_high - res.box_low) / (atr_15m if atr_15m > 0 else 1.0)
 
-    # Occupancy: % of closes inside the base
+    # Occupancy: % of closes inside the base (vectorized numpy mask)
     tol = 0.10 * atr_15m
-    inside = closes.between(res.box_low - tol, res.box_high + tol)
-    res.box_occupancy = float(inside.mean()) if len(closes) > 0 else 1.0
+    inside_mask = (closes >= (res.box_low - tol)) & (closes <= (res.box_high + tol))
+    res.box_occupancy = float(np.mean(inside_mask)) if len(closes) > 0 else 1.0
 
     res.bars_count = len(df)
     res.sessions_count = df["session_date"].nunique() if "session_date" in df.columns else 1

@@ -917,7 +917,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                     is_usable = (is_long_enough and is_recent_enough)
                     
                     if is_up_to_date and is_usable:
-                        # [VERSION: V5_ACQUISITION_ROUTING_V1.0] Enforce Cache Invariants: schema_version, indicator_version, ohlcv_hash
+                        # [VERSION: V5_ACQUISITION_ROUTING_V1.0] Enforce Cache Invariants: schema_version, indicator_version, row_count
                         meta_valid = False
                         if os.path.exists(meta_path):
                             try:
@@ -925,7 +925,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                                     meta = json.load(f)
                                 if (meta.get("schema_version") == CACHE_SCHEMA_VERSION and 
                                     meta.get("indicator_version") == INDICATOR_VERSION and
-                                    meta.get("ohlcv_hash") == compute_ohlcv_hash(cached_df)):
+                                    meta.get("row_count") == len(cached_df)):
                                     meta_valid = True
                             except Exception:
                                 pass
@@ -988,7 +988,7 @@ def _download_all_robust(watchlist: pd.DataFrame, period: str, interval: str, re
                     fetch_groups["FULL"] = []
                 fetch_groups["FULL"].append((sym, cached_df))
 
-    max_w = min(32, (os.cpu_count() or 4) + 4)
+    max_w = min(64, max(8, (os.cpu_count() or 4) * 8))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as executor:
         executor.map(process_symbol, symbols)
         
