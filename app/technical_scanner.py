@@ -1496,8 +1496,17 @@ def run_technical_scan(
         logger.info(f"📋 [TECHNICAL] Screening {len(watchlist)} universe stocks on Daily timeframe...")
 
         # 2. Fetch 1d OHLCV Data for Watchlist (reuse pre-warmed session if available)
-        if session is not None and getattr(session, "all_1d", None):
-            all_1d = session.all_1d
+        # [RULE 67 CHANGE-RATIONALE: SESSION_INGESTION_ROBUSTNESS_v1.1]
+        # Check both session.all_1d dictionary property and session.get() to ensure zero-overhead in-memory ingestion.
+        if session is not None:
+            if hasattr(session, "all_1d") and session.all_1d:
+                all_1d = session.all_1d
+            else:
+                all_1d = {
+                    s: session.get(s).ohlcv_df
+                    for s in watchlist
+                    if session.get(s) is not None and session.get(s).ohlcv_df is not None
+                }
             logger.info(f"⚡ [TECHNICAL] Reusing pre-warmed MarketDataSession 1D OHLCV data for {len(all_1d)} symbols.")
         else:
             all_1d = fetch_watchlist_data(

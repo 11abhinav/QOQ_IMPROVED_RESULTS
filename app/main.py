@@ -953,7 +953,7 @@ def run_evening_scanners():
             from database import is_scanner_stopped
             if not is_scanner_stopped("ACCUMULATION"):
                 logger.info("Starting Accumulation Scanner (18:35 IST Post-Bhavcopy)...")
-                _trigger_accumulation(trigger_type="SCHEDULED", scheduler_name="CRON")
+                _trigger_accumulation(trigger_type="SCHEDULED", scheduler_name="CRON", session=evening_session)
             else:
                 logger.info("⏭️ Accumulation Scanner is STOPPED by Admin. Skipping.")
         except Exception as _acc_err:
@@ -2567,30 +2567,30 @@ def _trigger_multi_tf_5m_monitor(trigger_type="SCHEDULED", scheduler_name="CRON"
     return run_multitf_5m_monitor(regime_ctx=regime_ctx, ist_now=ist_now, run_ctx=trigger_type)
 
 
-def _trigger_eod(trigger_type="MANUAL", scheduler_name="MANUAL"):
+def _trigger_eod(trigger_type="MANUAL", scheduler_name="MANUAL", session=None):
     import eod_scanner
-    eod_scanner.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=None, used_fallback_data=False)
+    eod_scanner.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=session, used_fallback_data=False)
 
-def _trigger_reversal(trigger_type="MANUAL", scheduler_name="MANUAL"):
+def _trigger_reversal(trigger_type="MANUAL", scheduler_name="MANUAL", session=None):
     import reversal_scanner
-    reversal_scanner.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=None, used_fallback_data=False)
+    reversal_scanner.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=session, used_fallback_data=False)
 
-def _trigger_pullback(trigger_type="MANUAL", scheduler_name="MANUAL"):
+def _trigger_pullback(trigger_type="MANUAL", scheduler_name="MANUAL", session=None):
     import pullback_pipeline
-    pullback_pipeline.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=None, used_fallback_data=False)
+    pullback_pipeline.start(force=True, trigger_type=trigger_type, scheduler_name=scheduler_name, session=session, used_fallback_data=False)
 
-def _trigger_wealth_engine(trigger_type="MANUAL", scheduler_name="MANUAL"):
+def _trigger_wealth_engine(trigger_type="MANUAL", scheduler_name="MANUAL", session=None):
     from wealth_engine import run_wealth_scan
-    run_wealth_scan(trigger_type=trigger_type, scheduler_name=scheduler_name)
+    run_wealth_scan(trigger_type=trigger_type, scheduler_name=scheduler_name, session=session)
 
-def _trigger_multibagger(trigger_type="MANUAL", scheduler_name="MANUAL"):
+def _trigger_multibagger(trigger_type="MANUAL", scheduler_name="MANUAL", session=None):
     import multibagger
-    return multibagger.start(trigger_type=trigger_type, scheduler_name=scheduler_name)
+    return multibagger.start(trigger_type=trigger_type, scheduler_name=scheduler_name, session=session)
 
-def _trigger_accumulation(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None):
+def _trigger_accumulation(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None, session=None):
     from accumulation_scanner import AccumulationScanner
     scanner = AccumulationScanner()
-    return scanner.start(force=True, run_ctx=run_ctx, trigger_type=trigger_type, scheduler_name=scheduler_name)
+    return scanner.start(force=True, run_ctx=run_ctx, trigger_type=trigger_type, scheduler_name=scheduler_name, session=session)
 
 def _trigger_technical(trigger_type="MANUAL", scheduler_name="MANUAL", run_ctx=None, session=None):
     from technical_scanner import run_technical_scan

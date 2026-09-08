@@ -2537,9 +2537,25 @@ def save_alert_if_new(
     weights_str = json.dumps(sanitized_weights, default=str) if sanitized_weights is not None else None
 
 
-    # [FIX_REVERTED] Force fetching live price here caused critical bugs where Entry > T1
-    # because targets were calculated using the scanner's trigger price, not this delayed live price.
-    # We must use the entry_price passed into the function to maintain mathematical integrity.
+    # [RULE 67 CHANGE-RATIONALE: ALERT_PRICE_ROUNDING_v1.0]
+    # Guarantees entry prices, stop-loss, and all targets are cleanly rounded off to 2 decimal places.
+    def _round_price(p):
+        if p is None:
+            return None
+        try:
+            return round(float(p), 2)
+        except (ValueError, TypeError):
+            return p
+
+    entry_price = _round_price(entry_price)
+    stop_loss = _round_price(stop_loss)
+    target_1 = _round_price(target_1)
+    target_2 = _round_price(target_2)
+    target_3 = _round_price(target_3)
+    target_4 = _round_price(target_4)
+    target_price = _round_price(target_price)
+    structural_failure_stop = _round_price(structural_failure_stop)
+    actual_entry_price = _round_price(actual_entry_price)
 
 
     # Safety: DB stale-buy check removed in v6 as scanners now reliably handle stale

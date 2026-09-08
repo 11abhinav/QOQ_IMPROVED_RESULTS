@@ -443,16 +443,16 @@ class ShortCoveringEarlyIgnitionScanner:
             grade = "C"
 
         ignition_low = float(cur_bar["low"])
-        stop_loss = min(ignition_low, cur_vwap * 0.996)
+        stop_loss = round(min(ignition_low, cur_vwap * 0.996), 2)
         risk_per_share = max(cur_close - stop_loss, cur_close * 0.005)
 
         if eod_candidate and eod_candidate.overhead_resistance > cur_close:
-            target = eod_candidate.overhead_resistance
+            target = round(float(eod_candidate.overhead_resistance), 2)
         else:
-            target = cur_close + (risk_per_share * 2.0)
+            target = round(cur_close + (risk_per_share * 2.0), 2)
 
-        rr_ratio = (target - cur_close) / risk_per_share
-        rs_pct = price_change_5m_pct - 0.10
+        rr_ratio = round((target - cur_close) / risk_per_share, 2)
+        rs_pct = round(price_change_5m_pct - 0.10, 2)
 
         signal = ShortCoveringSignal(
             symbol=symbol,

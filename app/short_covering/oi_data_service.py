@@ -34,6 +34,7 @@ class OIDataService:
         self.preferred_provider = preferred_provider.upper()
         self._daily_oi_cache: Dict[str, pd.DataFrame] = {}
         self._intraday_oi_cache: Dict[str, pd.DataFrame] = {}
+        self._fo_bhavcopy_table_exists: Optional[bool] = None
 
     def get_provider_capability(self, provider_name: Optional[str] = None) -> ProviderCapability:
         """Returns the capability specification for the given provider."""
@@ -140,17 +141,19 @@ class OIDataService:
                 from psycopg2.extras import RealDictCursor
                 with get_connection(timeout=1) as conn:
                     if not hasattr(conn, "is_dummy") or not conn.is_dummy:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                """
-                                SELECT EXISTS (
-                                    SELECT FROM information_schema.tables 
-                                    WHERE table_schema = 'public' AND table_name = 'daily_fo_bhavcopy'
-                                );
-                                """
-                            )
-                            table_exists = cur.fetchone()
-                        if table_exists and table_exists[0]:
+                        if self._fo_bhavcopy_table_exists is None:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    SELECT EXISTS (
+                                        SELECT FROM information_schema.tables 
+                                        WHERE table_schema = 'public' AND table_name = 'daily_fo_bhavcopy'
+                                    );
+                                    """
+                                )
+                                res = cur.fetchone()
+                                self._fo_bhavcopy_table_exists = bool(res and res[0])
+                        if self._fo_bhavcopy_table_exists:
                             with conn.cursor(cursor_factory=RealDictCursor) as r_cur:
                                 r_cur.execute(
                                     """

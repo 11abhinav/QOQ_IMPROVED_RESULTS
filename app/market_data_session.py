@@ -136,6 +136,19 @@ class MarketDataSession:
     def __len__(self) -> int:
         return len(self._symbol_data)
 
+    @property
+    def all_1d(self) -> dict:
+        """
+        [RULE 67 CHANGE-RATIONALE: SESSION_ALL_1D_PROPERTY_v1.0]
+        Provides dictionary mapping of symbol -> ohlcv_df for all loaded symbols in session.
+        Enables instant, zero-copy ingestion by technical and batch scanners without re-fetching from disk.
+        """
+        return {
+            sym: data.ohlcv_df
+            for sym, data in self._symbol_data.items()
+            if data is not None and data.ohlcv_df is not None
+        }
+
     def summary(self) -> str:
         m = self.metadata
         return (

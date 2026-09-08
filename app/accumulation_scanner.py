@@ -402,8 +402,8 @@ class AccumulationScanner:
             "cmp": cmp
         }
 
-    def start(self, force: bool = False, run_ctx=None, trigger_type: str = "SCHEDULED", scheduler_name: str = "SCHEDULER") -> Dict[str, Any]:
-        """Main scanner execution loop with full Health Card and Execution History integration."""
+    def start(self, force: bool = False, run_ctx=None, trigger_type: str = "SCHEDULED", scheduler_name: str = "SCHEDULER", session=None) -> Dict[str, Any]:
+        """Main scanner execution loop with full Health Card, Execution History, and MarketDataSession integration."""
         if is_scanner_stopped("ACCUMULATION"):
             logger.info("⏭️ ACCUMULATION scanner is STOPPED by Admin. Skipping.")
             return {"status": "STOPPED", "reason": "STOPPED_BY_ADMIN"}
@@ -562,15 +562,23 @@ class AccumulationScanner:
                     health.stop("ADMIN_STOP_DURING_PAUSE")
                     break
 
-                # Fetch daily OHLCV batch (with delta caching and heartbeat tracking)
-                logger.info(f"📥 [ACCUMULATION] Fetching OHLCV data for batch {b_idx} ({len(batch)} symbols)...")
-                ohlcv_map = fetch_watchlist_data(
-                    pd.DataFrame({"Stock": batch}),
-                    period="1y",
-                    interval="1d",
-                    requester="ACCUMULATION",
-                    run_ctx=run_ctx,
-                )
+                # Fetch daily OHLCV batch (from in-memory session if available, else delta caching)
+                # [RULE 67 CHANGE-RATIONALE: SESSION_FAST_PATH_ACCUMULATION_v1.0]
+                # Reuses in-memory MarketDataSession if available to avoid repeated disk reads.
+                if session is not None:
+                    ohlcv_map = {
+                        sym: (session.get(sym).ohlcv_df if session.get(sym) is not None else None)
+                        for sym in batch
+                    }
+                else:
+                    logger.info(f"📥 [ACCUMULATION] Fetching OHLCV data for batch {b_idx} ({len(batch)} symbols)...")
+                    ohlcv_map = fetch_watchlist_data(
+                        pd.DataFrame({"Stock": batch}),
+                        period="1y",
+                        interval="1d",
+                        requester="ACCUMULATION",
+                        run_ctx=run_ctx,
+                    )
                 if run_ctx and hasattr(run_ctx, "heartbeat"):
                     run_ctx.heartbeat(force=True)
 
