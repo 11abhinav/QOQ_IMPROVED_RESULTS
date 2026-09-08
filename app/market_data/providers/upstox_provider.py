@@ -532,8 +532,31 @@ class UpstoxProvider(ProviderInterface):
                         matched_quote = quote_dict.get(inst_key) or quote_dict.get(inst_key.replace("|", ":"))
                         if matched_quote:
                             results[orig_sym] = matched_quote
+                elif res.status_code == 400 and len(chunk) > 1:
+                    # [RULE 67 CHANGE-RATIONALE] Upstox returns UDAPI1087 (400) for the entire batch if a single key is unlisted/invalid.
+                    # Recover gracefully by requesting keys individually for this chunk so valid symbols succeed.
+                    logger.debug(f"Upstox batch 400 on chunk of {len(chunk)} — falling back to individual symbol resolution")
+                    for single_sym in chunk:
+                        s_key = self._get_instrument_key(single_sym)
+                        if not s_key:
+                            continue
+                        try:
+                            s_url = f"https://api.upstox.com/v2/market-quote/quotes?instrument_key={urllib.parse.quote(s_key)}"
+                            s_res = _upstox_session.get(s_url, headers=headers, timeout=4)
+                            if s_res.status_code == 200 and s_res.content:
+                                try:
+                                    import json
+                                    s_data = json.loads(s_res.content)
+                                    s_dict = s_data.get("data", {})
+                                    for k, q in s_dict.items():
+                                        results[k] = q
+                                        results[single_sym] = q
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                 else:
-                    logger.error(f"Failed live quote batch fetch (Status {res.status_code}): {res.text[:200] if res.text else ''}")
+                    logger.debug(f"Live quote fetch returned status {res.status_code}: {res.text[:150] if res.text else ''}")
                 merge_ms = (time.perf_counter() - _t_merge) * 1000
 
                 # [PHASE1_DIAG] Redundant-call detection: warn if calls exceed requested symbols
