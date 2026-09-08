@@ -2033,8 +2033,8 @@ def check_scanner_staleness(now):
                             try:
                                 from main import trigger_scanner_manual
                                 auto_res = trigger_scanner_manual(sc)
-                                if auto_res and auto_res.get("status") in ("success", "ok", "queued"):
-                                    logger.info(f"🔄 [AUTO-RECOVERY] Auto-started stale scanner '{sc}' (gap: {int(gap_minutes)}m)")
+                                if auto_res and (auto_res.get("status") in ("success", "ok", "queued") or "already actively running" in str(auto_res.get("message", "")).lower()):
+                                    logger.info(f"🔄 [AUTO-RECOVERY] Auto-started or actively running scanner '{sc}' (gap: {int(gap_minutes)}m)")
                                     continue
                                 else:
                                     is_stale = True
