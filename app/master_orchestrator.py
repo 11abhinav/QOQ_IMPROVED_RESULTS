@@ -491,19 +491,21 @@ class MasterOrchestratorV2:
         return self._get_cached("confirmed_signals", 2.5, self._get_confirmed_signals_uncached)
 
     def _get_confirmed_signals_uncached(self) -> List[Dict[str, Any]]:
-        # [AUDIT FIX]: Query only OPEN, non-rejected, structurally valid technical signals.
-        # Exclude MULTIBAGGER (which is fundamental / long-term and has its own Investment Watch tab).
-        # Enforce mathematical invariants: entry > 0, stop_loss > 0, stop_loss < entry, target_1 > entry.
+        # [RULE 67 CHANGE-RATIONALE]:
+        # 1. Query OPEN and ACTIVE technical breakout alerts.
+        # 2. Support both target_1 and target_price via COALESCE(target_1, target_price, 0) > entry_price
+        #    so alerts with target_price are not dropped when target_1 is NULL.
+        # 3. Enforce valid risk parameters (entry > 0, stop_loss > 0, stop_loss < entry).
         query = """
-            SELECT symbol, scanner, breakout_type, entry_price, current_price as cmp, stop_loss, target_1, target_2, score as quality_grade, signals, alert_time, context
+            SELECT symbol, scanner, breakout_type, entry_price, current_price as cmp, stop_loss, target_1, target_2, target_price, score as quality_grade, signals, alert_time, context
             FROM alerts
             WHERE is_rejected = FALSE
-              AND status = 'OPEN'
+              AND status IN ('OPEN', 'ACTIVE')
               AND scanner NOT IN ('MULTIBAGGER')
               AND entry_price > 0
               AND stop_loss > 0
               AND stop_loss < entry_price
-              AND target_1 > entry_price
+              AND COALESCE(target_1, target_price, 0) > entry_price
             ORDER BY alert_time DESC LIMIT 150
         """
         raw_signals = self._run_query(query)
@@ -533,15 +535,17 @@ class MasterOrchestratorV2:
 
             entry = float(sig.get("entry_price") or 0.0)
             sl = float(sig.get("stop_loss") or 0.0)
-            t1 = float(sig.get("target_1") or 0.0)
+            t1 = float(sig.get("target_1") or sig.get("target_price") or 0.0)
+            if not sig.get("target_1") and t1 > 0:
+                sig["target_1"] = t1
             risk = entry - sl
 
             if risk <= 0 or t1 <= entry:
                 continue
 
             rr = round((t1 - entry) / risk, 2)
-            # Enforce minimum viable execution R:R of 1.25R
-            if rr < 1.25:
+            # Enforce minimum viable execution R:R of 1.0R
+            if rr < 1.0:
                 continue
 
             seen_symbols.add(sym)
@@ -613,7 +617,7 @@ class MasterOrchestratorV2:
                     last_updated AS updated_at
                 FROM breakout_watchlist
                 WHERE is_active = TRUE 
-                  AND current_state IN ('WATCH', 'ARMED', 'DEVELOPING', 'BASE_BUILDING', 'CANDIDATE')
+                  AND current_state IN ('WATCH', 'ARMED', 'DEVELOPING', 'BASE_BUILDING', 'CANDIDATE', 'HOURLY_APPROVED', 'SETUP_ARMED', 'ENTRY_READY', 'WATCHING')
             )
             SELECT DISTINCT ON (symbol)
                 symbol, scanner, stage, quality_score, maturity_score, cmp, trigger_level,
@@ -716,13 +720,33 @@ class MasterOrchestratorV2:
         return self._get_cached("investment_watch", 30.0, self._get_investment_watch_uncached)
 
     def _get_investment_watch_uncached(self) -> List[Dict[str, Any]]:
-        query = """
-            SELECT symbol, technical_score as quality_score, status as investment_state, NULL as cmp, metadata
-            FROM candidates
-            WHERE scanner IN ('MULTIBAGGER', 'WEALTH')
-            ORDER BY created_at DESC LIMIT 50
+        # [RULE 67 CHANGE-RATIONALE]:
+        # 1. Primary: Multibagger watchlist table in PostgreSQL
+        query_mb_watchlist = """
+            SELECT symbol, total_score as quality_score, status as investment_state, latest_price as cmp, bucket, notes as why_qualifies, growth_score, value_score, trend_score
+            FROM watchlist
+            WHERE status IN ('WAITING_BUY_ZONE', 'ALERT_TRIGGERED', 'ACTIVE', 'WATCHLIST')
+            ORDER BY total_score DESC NULLS LAST LIMIT 50
         """
-        inv_list = self._run_query(query)
+        inv_list = self._run_query(query_mb_watchlist)
+
+        if not inv_list:
+            query = """
+                SELECT symbol, technical_score as quality_score, status as investment_state, NULL as cmp, metadata
+                FROM candidates
+                WHERE scanner IN ('MULTIBAGGER', 'WEALTH')
+                ORDER BY created_at DESC LIMIT 50
+            """
+            inv_list = self._run_query(query)
+
+        if not inv_list:
+            query_alerts = """
+                SELECT symbol, score as quality_score, status as investment_state, current_price as cmp, signals as why_qualifies
+                FROM alerts
+                WHERE scanner IN ('MULTIBAGGER', 'WEALTH')
+                ORDER BY alert_time DESC LIMIT 50
+            """
+            inv_list = self._run_query(query_alerts)
 
         if not inv_list:
             inv_list = self._run_query("SELECT symbol, category as investment_state FROM breakout_watchlist LIMIT 100")
