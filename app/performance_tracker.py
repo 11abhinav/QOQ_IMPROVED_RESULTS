@@ -942,6 +942,7 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
             "target_2":      _f(row.get("target_2")),
             "target_3":      _f(row.get("target_3")),
             "current_price": _f(row.get("current_price")),
+            "cmp_updated_at": row.get("cmp_updated_at").isoformat() if hasattr(row.get("cmp_updated_at"), "isoformat") else (str(row.get("cmp_updated_at")) if row.get("cmp_updated_at") else None),
             "exit_price":    _extract_exit_price(row),   # pre-filled if already closed
             "pnl_pct":       _f(row.get("pnl_pct")),      # pre-filled if already closed
             "stopped_out":   row.get("status") == "LOSS",
@@ -1109,6 +1110,7 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
         cur_p = current_prices.get(sym)
         if cur_p is not None and cur_p > 0:
             t["current_price"] = round(cur_p, 2)
+            t["cmp_updated_at"] = now_ist.strftime('%Y-%m-%d %H:%M:%S')
             if not t["_db_closed"]:
                 # Calculate live unrealized P&L
                 if ep and ep > 0:

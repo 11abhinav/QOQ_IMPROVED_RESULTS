@@ -587,6 +587,7 @@ def init_db():
                 cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS rvol_diurnal REAL")
                 cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS source_trading_date DATE")
                 cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS alert_fingerprint VARCHAR(128)")
+                cur.execute("ALTER TABLE alerts ADD COLUMN IF NOT EXISTS cmp_updated_at TIMESTAMPTZ")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_source_trading_date ON alerts(symbol, scanner, source_trading_date)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_alerts_fingerprint ON alerts(alert_fingerprint)")
 
@@ -3396,12 +3397,16 @@ def update_shadow_alert_outcome(
                 logger.exception(f"❌ update_shadow_alert_outcome failed for alert_id={alert_id}")
 
 def update_alert_current_price(alert_id: int, current_price: float) -> None:
-    """Update current_price column for a specific alert."""
+    """Update current_price and cmp_updated_at column for a specific alert."""
     with _DB_WRITE_LOCK:
         with get_connection() as conn:
             try:
                 with conn.cursor() as cur:
-                    cur.execute("UPDATE alerts SET current_price = %s WHERE id = %s", (current_price, alert_id))
+                    cur.execute("""
+                        UPDATE alerts 
+                        SET current_price = %s, cmp_updated_at = NOW() AT TIME ZONE 'Asia/Kolkata' 
+                        WHERE id = %s
+                    """, (current_price, alert_id))
                     conn.commit()
             except Exception as e:
                 logger.warning(f"⚠️ Failed to update current_price to {current_price} for alert_id {alert_id}: {e}")

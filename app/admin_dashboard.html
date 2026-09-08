@@ -3686,7 +3686,10 @@ function changeAdminPage(type, delta) {
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${scoreBadge}</td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${rangeHtml}</td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${testsHtml}</td>
-          <td style="font-family:var(--font-mono); font-size:11px; font-weight:600; padding:8px 0; border-bottom:1px solid var(--border);">${cmpStr}</td>
+          <td style="font-family:var(--font-mono); font-size:12px; font-weight:700; padding:8px 0; border-bottom:1px solid var(--border);">
+            <div>${cmpStr}</div>
+            ${(item.cmp_updated || item.last_updated) ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; margin-top:2px;">${item.cmp_updated ? String(item.cmp_updated).slice(11,16) : timeStr}</div>` : ''}
+          </td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${severityHtml}</td>
           <td style="font-family:var(--font-mono); font-size:10px; padding:8px 0; border-bottom:1px solid var(--border);">${timeStr}</td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border); text-align:right;">
@@ -4384,11 +4387,11 @@ function getEarningsBadgeHtml(item) {
       <td>${badgeHtml(t.status, t)}</td>
       <td style="text-align:center;"><button onclick="openChart('${t.symbol}', ${t.current_price || t.entry_price}); event.stopPropagation();" style="background:var(--card2); border:1px solid var(--border); color:var(--text); padding:4px 8px; border-radius:4px; font-size:12px; cursor:pointer;" title="View Chart">📈</button></td>
       <td>${fmt(t.entry_price)}</td>
-      <td title="${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') ? (t.closed_at ? 'Closed: ' + fmtDetailTime(t.closed_at) : '') : (window.DATA_GENERATED_AT ? 'Updated: ' + fmtDetailTime(window.DATA_GENERATED_AT) : '')}">
-        ${fmt(t.exit_price || t.current_price)}
+      <td title="${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') ? (t.closed_at ? 'Closed: ' + fmtDetailTime(t.closed_at) : '') : ((t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) ? 'Updated: ' + fmtDetailTime(t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) : '')}">
+        <div style="font-weight:700;">${fmt(t.exit_price || t.current_price)}</div>
         ${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') 
           ? (t.closed_at ? `<div style="font-size:9px; color:var(--muted); white-space:nowrap; margin-top:2px;">Closed: ${fmtDetailTime(t.closed_at)}</div>` : '') 
-          : (window.DATA_GENERATED_AT ? `<div style="font-size:9px; color:var(--muted); white-space:nowrap; margin-top:2px;">${fmtDetailTime(window.DATA_GENERATED_AT)}</div>` : '')}
+          : ((t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; white-space:nowrap; margin-top:2px;">${fmtTs(t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT)}</div>` : '')}
       </td>
       <td class="col-opt">${fmt(t.capital_allocated)}</td>
       <td class="col-opt">${t.shares_bought || '\u2014'}</td>

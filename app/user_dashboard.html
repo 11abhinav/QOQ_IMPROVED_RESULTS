@@ -1325,7 +1325,10 @@ window.renderSignalLadder = function() {
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${scoreBadge}</td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${rangeHtml}</td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${testsHtml}</td>
-          <td style="font-family:var(--font-mono); font-size:11px; font-weight:600; padding:8px 0; border-bottom:1px solid var(--border);">${cmpStr}</td>
+          <td style="font-family:var(--font-mono); font-size:12px; font-weight:700; padding:8px 0; border-bottom:1px solid var(--border);">
+            <div>${cmpStr}</div>
+            ${(d.cmp_updated || d.last_updated) ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; margin-top:2px;">${fmtTs(d.cmp_updated || d.last_updated)}</div>` : ''}
+          </td>
           <td style="padding:8px 0; border-bottom:1px solid var(--border);">${severityHtml}</td>
           <td style="color:var(--muted); font-size:11px; padding:8px 0; border-bottom:1px solid var(--border);">${lastUpd}</td>
           <td style="text-align:right; padding:8px 0; border-bottom:1px solid var(--border); white-space:nowrap;">
@@ -1422,11 +1425,11 @@ function buildTradeRows(trades, maxAbs, prefix) {
         <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 2px;">Trig: ${fmt(t.entry_price)}</div>
         <div style="font-size: 13px;">${t.actual_entry_price ? fmt(t.actual_entry_price) : (t.execution_state === 'PENDING_ENTRY' ? '—' : fmt(t.entry_price))}</div>
       </td>
-      <td title="${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') ? (t.closed_at ? 'Closed: ' + fmtDetailTime(t.closed_at) : '') : (window.DATA_GENERATED_AT ? 'Updated: ' + fmtDetailTime(window.DATA_GENERATED_AT) : '')}">
-        ${fmt(t.exit_price || t.current_price)}
+      <td title="${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') ? (t.closed_at ? 'Closed: ' + fmtDetailTime(t.closed_at) : '') : ((t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) ? 'Updated: ' + fmtDetailTime(t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) : '')}">
+        <div style="font-weight:700;">${fmt(t.exit_price || t.current_price)}</div>
         ${(t.status === 'WIN' || t.status === 'LOSS' || t.status === 'CLOSED' || t.status === 'REJECTED') 
           ? (t.closed_at ? `<div style="font-size:9px; color:var(--muted); white-space:nowrap; margin-top:2px;">Closed: ${fmtDetailTime(t.closed_at)}</div>` : '') 
-          : (window.DATA_GENERATED_AT ? `<div style="font-size:9px; color:var(--muted); white-space:nowrap; margin-top:2px;">${fmtDetailTime(window.DATA_GENERATED_AT)}</div>` : '')}
+          : ((t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT) ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; white-space:nowrap; margin-top:2px;">${fmtTs(t.cmp_updated_at || t.cmp_updated || window.DATA_GENERATED_AT)}</div>` : '')}
       </td>
       <td class="col-opt">${fmt(t.capital_allocated)}</td>
       <td class="col-opt">${t.shares_bought||'\u2014'}</td>
@@ -3518,7 +3521,10 @@ function renderMultibaggerWatchlist() {
           </div>
           <div style="font-size:10px; color:var(--muted); margin-top:2px;">${status === 'INVALIDATED' ? 'Failed Checks' : bucketTag(bucket)}</div>
         </td>
-        <td class="mono font-bold" style="color:var(--text); font-size:13px;">₹${cmp > 0 ? cmp.toFixed(2) : '-'}</td>
+        <td class="mono font-bold" style="color:var(--text); font-size:13px;">
+          <div>₹${cmp > 0 ? cmp.toFixed(2) : '-'}</div>
+          ${(item.cmp_updated || item.updated_at || item.last_updated) ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; margin-top:2px;">${fmtTs(item.cmp_updated || item.updated_at || item.last_updated)}</div>` : ''}
+        </td>
         <td class="mono" style="text-align:center;">${bqsHtml}</td>
         <td class="mono" style="text-align:center;">${rvsHtml}</td>
         <td class="mono" style="text-align:center;">${trendHtml}</td>
@@ -4411,8 +4417,10 @@ function _renderUserWatchlistTable() {
     }
 
     const cmp = item.cmp;
+    const cmpTsVal = item.cmp_updated_at || item.cmp_updated || item.updated_at;
+    const cmpTimeStr = cmpTsVal ? fmtTs(cmpTsVal) : '';
     const cmpText = (cmp != null && !isNaN(cmp) && Number(cmp) > 0)
-      ? `<span style="font-family:var(--font-mono); font-weight:700; color:var(--accent); font-size:13px;">₹${Number(cmp).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>`
+      ? `<div><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent); font-size:13px;">₹${Number(cmp).toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>${cmpTimeStr ? `<div style="font-size:9px; color:var(--muted); font-weight:normal; margin-top:2px;">${cmpTimeStr}</div>` : ''}</div>`
       : `<span style="color:var(--muted); font-size:12px;">—</span>`;
 
     const scoreVal = item.last_health_score ?? item.health_score ?? item.fm_score;

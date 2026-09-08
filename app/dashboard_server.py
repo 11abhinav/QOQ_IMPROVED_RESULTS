@@ -1391,7 +1391,7 @@ def performance_json():
                     with conn.cursor(cursor_factory=RealDictCursor) as cur:
                         cur.execute("""
                             SELECT id, symbol, scanner, category, signals, entry_price, actual_entry_price,
-                                   current_price, stop_loss, initial_stop_loss, target_price, target_1, target_2, target_3,
+                                   current_price, cmp_updated_at, stop_loss, initial_stop_loss, target_price, target_1, target_2, target_3,
                                    score, alert_time, alert_date, status, pnl_pct, pnl_rs, exit_price, shares_bought,
                                    capital_allocated, is_rejected, days_to_earnings, earnings_date, earnings_severity,
                                    warning_msg, execution_state, closed_at
@@ -1423,6 +1423,8 @@ def performance_json():
                         at_str = at_raw.isoformat() if hasattr(at_raw, "isoformat") else (str(at_raw) if at_raw else "")
                         ad_raw = r.get("alert_date")
                         ad_str = ad_raw.isoformat()[:10] if hasattr(ad_raw, "isoformat") else (str(ad_raw)[:10] if ad_raw else (at_str[:10] if at_str else ""))
+                        cmp_ts_raw = r.get("cmp_updated_at")
+                        cmp_ts_str = cmp_ts_raw.isoformat() if hasattr(cmp_ts_raw, "isoformat") else (str(cmp_ts_raw) if cmp_ts_raw else None)
 
                         missing_trades.append({
                             "id": r.get("id"),
@@ -1441,6 +1443,7 @@ def performance_json():
                             "target_2": _safe_float(r.get("target_2")),
                             "target_3": _safe_float(r.get("target_3")),
                             "current_price": cp_val,
+                            "cmp_updated_at": cmp_ts_str,
                             "exit_price": xp_val,
                             "pnl_pct": pnl_val,
                             "pnl_rs": pnl_rs_val,
