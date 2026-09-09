@@ -1064,8 +1064,6 @@ def _start_wrapper(force: bool = False, session=None, run_ctx=None, used_fallbac
                         rows_fetched = sum(len(df) for df in all_ticker_data.values() if isinstance(df, pd.DataFrame))
                         tracker.mark_fetch_complete(row_count=rows_fetched)
 
-                        import threading
-                        from concurrent.futures import ThreadPoolExecutor, as_completed
                         _batch_lock = threading.Lock()
                         def _process_row(idx, row_tuple, all_ticker_data=all_ticker_data):
                             symbol = "UNKNOWN"
