@@ -120,12 +120,15 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
         logger.warning("🛑 [DUPLICATE GUARD] MULTI_TF Scanner is ALREADY actively running in thread lock. Skipping duplicate trigger.")
         return {"status": "skipped", "reason": "already_running"}
 
-    acquired_global = False
     acquired_scan = False
     start_time = time.monotonic()
     real_run_ctx = None
 
     try:
+        # [RULE 67 CHANGE-RATIONALE: PARALLEL_INTRADAY_EXECUTION_v1.0]
+        # MULTI_TF is an intraday 15m scanner that runs concurrently with other scanners and the 5m monitor.
+        # It uses its dedicated _scan_lock ("multi_tf_scanner") to prevent duplicate 15m cycles,
+        # without competing for or waiting in queue on global_scanner_lock.
         logger.info("[MULTI_TF] Acquiring lock: multi_tf_scanner")
         if not _scan_lock.acquire(blocking=False):
             logger.warning("🛑 [MULTI_TF] Lock 'multi_tf_scanner' is held by another MULTI_TF instance. Skipping duplicate cycle.")
@@ -136,24 +139,6 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
                 pass
             return {"status": "skipped", "reason": "already_running"}
         acquired_scan = True
-
-        # Acquire universal global scanner lock
-        if not _global_lock.acquire(blocking=False, owner_scanner="MULTI_TF", operation="FULL_SCAN"):
-            logger.info("⏳ [MULTI_TF] Global scanner lock busy — waiting in queue until active scanner finishes...")
-            upsert_scanner_health("MULTI_TF", "QUEUED", error_msg="Waiting in queue for active scanner to release lock...")
-
-            try:
-                acquired_global = _global_lock.acquire(blocking=True, owner_scanner="MULTI_TF", operation="FULL_SCAN")
-            except Exception as lock_err:
-                logger.error(f"❌ [MULTI_TF] Error acquiring global lock: {lock_err}")
-                acquired_global = False
-
-            if not acquired_global:
-                logger.error("❌ [MULTI_TF] Failed to acquire global scanner lock after queue wait.")
-                upsert_scanner_health("MULTI_TF", "IDLE", error_msg="Lock acquisition timed out")
-                return
-        else:
-            acquired_global = True
 
         logger.info("=" * 70)
         logger.info("📊 MULTI_TF V2 ENGINE | Starting 15m execution cycle (Lazy Fetch)...")
@@ -747,11 +732,6 @@ def run_multitf_v2(regime_ctx: Dict[str, Any], ist_now: datetime, run_ctx: str =
                 pass
         telemetry.log_scheduler_event("MULTI_TF", "CYCLE_FAILED", error=str(exc))
     finally:
-        if acquired_global:
-            try:
-                _global_lock.release()
-            except Exception as _ge:
-                logger.debug(f"Error releasing global lock: {_ge}")
         if acquired_scan:
             try:
                 _scan_lock.release()

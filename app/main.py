@@ -2364,6 +2364,7 @@ def trigger_scanner_manual(scanner_key: str) -> dict:
     LOCK_MAP = {
         "DAILY_BUILDER": lambda: __import__('daily_builder')._build_lock,
         "MULTI_TF":      lambda: __import__('multitf.scanner', fromlist=['_scan_lock'])._scan_lock,
+        "MULTI_TF_5M":   lambda: __import__('multitf.scanner', fromlist=['_scan_lock_5m'])._scan_lock_5m,
         "EOD":           lambda: __import__('eod_scanner')._scan_lock,
         "REVERSAL":      lambda: __import__('reversal_scanner')._scan_lock,
         "PULLBACK":      lambda: __import__('pullback_pipeline')._scan_lock,
