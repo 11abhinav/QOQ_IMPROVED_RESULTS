@@ -263,8 +263,14 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
 
     if not t1: return  # Sanity check
 
+    # [RULE 67 CHANGE-RATIONALE]: Ensure shares_bought is populated so replay percentage and share calculations never abort
     shares_bought = t.get("shares_bought", 0)
-    if shares_bought == 0: return
+    if not shares_bought or shares_bought == 0:
+        ep_val = t.get("entry_price") or 100.0
+        cap_val = t.get("capital_allocated") or 20000.0
+        shares_bought = max(1, int(float(cap_val) / float(ep_val)))
+        t["shares_bought"] = shares_bought
+        t["remaining_shares"] = shares_bought
 
     # Load existing DB events to avoid duplicate writes
     eh = t.get("exit_history")
@@ -296,10 +302,13 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
         else:
             t["stop_loss"] = initial_sl
 
-        t["status"] = "OPEN" if execution_state != "PENDING_ENTRY" else "PENDING_ENTRY"
+        execution_state = "OPEN" if execution_state != "PENDING_ENTRY" else "PENDING_ENTRY"
+        t["execution_state"] = execution_state
+        t["status"] = execution_state
         t["remaining_shares"] = shares_bought
         hist_list = []
         t["exit_history"] = "[]"
+        db_events = set()
     else:
         # Fast Mode: Preserve current DB state and history
         hist_list = existing_hist
@@ -427,6 +436,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
             if "GAP_LOSS" not in db_events:
                 update_partial_exit(t["id"], final_status, sl, rem_shares, 0, pnl_rs_event, event, execution_state)
                 update_alert_outcome(t["id"], final_status, exit_p, total_pnl_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="GAP_LOSS", execution_state=execution_state)
+                db_events.add("GAP_LOSS")
 
             t["status"] = final_status
             t["exit_price"] = exit_p
@@ -460,6 +470,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
             if "SL_HIT" not in db_events:
                 update_partial_exit(t["id"], final_status, sl, rem_shares, 0, pnl_rs_event, event, execution_state)
                 update_alert_outcome(t["id"], final_status, exit_p, total_pnl_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="STOP_LOSS", execution_state=execution_state)
+                db_events.add("SL_HIT")
 
             t["status"] = final_status
             t["exit_price"] = exit_p
@@ -491,6 +502,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
             if "STRUCT_FAIL" not in db_events:
                 update_partial_exit(t["id"], final_status, sl, rem_shares, 0, pnl_rs_event, event, execution_state)
                 update_alert_outcome(t["id"], final_status, exit_p, total_pnl_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="STRUCTURAL_FAIL", execution_state=execution_state)
+                db_events.add("STRUCT_FAIL")
 
             t["status"] = final_status
             t["exit_price"] = exit_p
@@ -534,6 +546,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
 
             if "T1_HIT" not in db_events:
                 update_partial_exit(t["id"], new_status, new_sl, shares_to_sell, new_rem, pnl_rs_event, event, execution_state)
+                db_events.add("T1_HIT")
 
             if new_rem <= 0:
                 t["status"] = "WIN"
@@ -549,6 +562,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
                 t["execution_state"] = execution_state
                 if "T1_HIT" not in db_events:
                     update_alert_outcome(t["id"], "WIN", exit_p, p_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="TARGET_HIT", execution_state=execution_state)
+                    db_events.add("T1_HIT")
                 continue
 
         status = t["status"]
@@ -582,6 +596,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
 
             if "T2_HIT" not in db_events:
                 update_partial_exit(t["id"], new_status, new_sl, shares_to_sell, new_rem, pnl_rs_event, event, execution_state)
+                db_events.add("T2_HIT")
 
             if new_rem <= 0:
                 t["status"] = "WIN"
@@ -597,6 +612,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
                 t["execution_state"] = execution_state
                 if "T2_HIT" not in db_events:
                     update_alert_outcome(t["id"], "WIN", exit_p, p_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="TARGET_HIT", execution_state=execution_state)
+                    db_events.add("T2_HIT")
                 continue
 
         status = t["status"]
@@ -627,6 +643,7 @@ def process_trade_history(t: dict, hist: pd.DataFrame, cur_p: float):
             if "T3_HIT" not in db_events:
                 update_partial_exit(t["id"], "WIN", t2, shares_to_sell, 0, pnl_rs_event, event, execution_state)
                 update_alert_outcome(t["id"], "WIN", exit_p, p_pct, pnl_rs=total_pnl_rs, closed_at=ts_str, exit_signal="TARGET_HIT", execution_state=execution_state)
+                db_events.add("T3_HIT")
             continue
 
     # ── Calculate Alert Quality Metrics (Wave 1) ──
@@ -1197,9 +1214,8 @@ def build_performance_data(fast_mode=False, force_live_fetch=False, recalc_ids: 
                     pre_hist = prefetched_data.get(sym) if sym in prefetched_data else None
                     hist = _fetch_post_alert_bars(sym, alert_time, prefetched_hist=pre_hist)
 
-            # If we are doing a historical replay (hist is populated), do NOT artificially append the current live price
-            # as a tick. It can trigger trailing SLs at incorrect (current) timestamps.
-            process_trade_history(t, hist, cur_p=None if (hist is not None) else cur_p)
+            # If market is open, pass cur_p so the latest real-time tick is evaluated at the end of the historical sequence
+            process_trade_history(t, hist, cur_p=cur_p if (is_open and cur_p) else None)
 
         elif sl and alert_time:
             # SL only (no target stored — legacy or partial row)

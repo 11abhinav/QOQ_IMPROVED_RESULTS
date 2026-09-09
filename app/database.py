@@ -3426,12 +3426,12 @@ def reset_alert_for_recalculation(alert_id: int) -> bool:
             try:
                 with conn.cursor() as cur:
                     # Verify alert exists and get some base data
-                    cur.execute("SELECT status, stop_loss, initial_stop_loss, shares_bought, scanner FROM alerts WHERE id = %s", (alert_id,))
+                    cur.execute("SELECT status, stop_loss, initial_stop_loss, shares_bought, scanner, entry_price, capital_allocated FROM alerts WHERE id = %s", (alert_id,))
                     row = cur.fetchone()
                     if not row:
                         return False
 
-                    old_status, current_sl, initial_sl, shares_bought, scanner_name = row
+                    old_status, current_sl, initial_sl, shares_bought, scanner_name, entry_price, capital_allocated = row
 
                     if scanner_name in ('MULTIBAGGER', 'WEALTH'):
                         msg = f"Blocked recalculation for {scanner_name} alert #{alert_id}. Long-term investments do not support tick-by-tick replays or trailing SLs."
@@ -3441,29 +3441,37 @@ def reset_alert_for_recalculation(alert_id: int) -> bool:
                         insert_notification('error', 'Recalculation Blocked', msg)
                         return False
 
-
                     # If initial_stop_loss is null for some legacy reason, use current_sl as fallback
                     reset_sl = initial_sl if initial_sl else current_sl
+
+                    # [RULE 67 CHANGE-RATIONALE]: Ensure shares_bought is populated so replay percentage and share calculations never abort
+                    if not shares_bought or shares_bought <= 0:
+                        ep = float(entry_price) if entry_price and float(entry_price) > 0 else 100.0
+                        cap = float(capital_allocated) if capital_allocated and float(capital_allocated) > 0 else 20000.0
+                        shares_bought = max(1, int(cap / ep))
 
                     cur.execute("""
                         UPDATE alerts
                         SET status = 'OPEN',
+                            execution_state = 'OPEN',
                             stop_loss = %s,
                             exit_price = NULL,
                             pnl_pct = NULL,
                             pnl_rs = NULL,
                             closed_at = NULL,
                             exit_history = NULL,
+                            exit_signal = NULL,
+                            shares_bought = %s,
                             remaining_shares = %s
                         WHERE id = %s
-                    """, (reset_sl, shares_bought, alert_id))
+                    """, (reset_sl, shares_bought, shares_bought, alert_id))
 
-                    new_state = {"status": "OPEN", "stop_loss": reset_sl, "remaining_shares": shares_bought, "exit_history": None}
+                    new_state = {"status": "OPEN", "execution_state": "OPEN", "stop_loss": reset_sl, "remaining_shares": shares_bought, "exit_history": None}
                     cur.execute("INSERT INTO trade_audit_log (alert_id, action, old_state, new_state) VALUES (%s, %s, %s, %s)",
                                 (alert_id, 'RECALCULATE_RESET', json.dumps({"status": old_status}, default=str), json.dumps(new_state, default=str)))
                     conn.commit()
                     success = True
-                    logger.info(f"🔄 Alert {alert_id} reset to OPEN for recalculation. SL restored to {reset_sl}.")
+                    logger.info(f"🔄 Alert {alert_id} reset to OPEN for recalculation. SL restored to {reset_sl}, shares={shares_bought}.")
                     return True
             except Exception as e:
                 logger.exception(f"❌ reset_alert_for_recalculation failed for alert_id={alert_id}")
