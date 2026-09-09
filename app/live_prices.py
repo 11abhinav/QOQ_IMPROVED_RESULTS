@@ -151,7 +151,11 @@ def get_live_prices(symbols: List[str], purpose: str = "UNSPECIFIED") -> Dict[st
     with _live_prices_lock:
         # Check recent fast-cache first (with alias normalization)
         for s in symbols:
+            if not s or not isinstance(s, str):
+                continue
             clean_s = str(s).replace('.NS', '').replace('.BO', '').replace('BSE:', '').replace('NSE:', '').strip().upper()
+            if not clean_s or clean_s in ('?', 'NONE', 'NAN', 'NULL', 'UNKNOWN') or not any(c.isalnum() for c in clean_s):
+                continue
             cached_entry = _recent_quotes_cache.get(s) or _recent_quotes_cache.get(clean_s) or _recent_quotes_cache.get(f"{clean_s}.NS") or _recent_quotes_cache.get(f"NSE:{clean_s}")
             if cached_entry and (now - cached_entry["ts"]) < _RECENT_TTL:
                 prices[s] = cached_entry["price"]

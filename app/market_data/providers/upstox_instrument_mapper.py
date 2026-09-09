@@ -265,6 +265,9 @@ class UpstoxInstrumentMapper:
                 clean = clean[:-len(sfx)]
                 break
 
+        if not clean or clean in ('?', 'NONE', 'NAN', 'NULL', 'UNKNOWN') or not any(c.isalnum() for c in clean):
+            return None
+
         # 0. Check if clean is ISIN (e.g. INE989C01038)
         if clean.startswith("INE") and len(clean) == 12:
             isin_key = f"NSE_EQ|{clean}"

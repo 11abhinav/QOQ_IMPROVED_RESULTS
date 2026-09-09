@@ -95,9 +95,18 @@ class UnifiedFetcher:
         Uses ProviderSelector for routing.
         Returns a dict of symbol -> quote data mapping.
         """
-        if not symbols:
+        valid_symbols = []
+        for s in symbols:
+            if not s or not isinstance(s, str):
+                continue
+            clean = str(s).replace('.NS', '').replace('.BO', '').replace('BSE:', '').replace('NSE:', '').strip().upper()
+            if clean and clean not in ('?', 'NONE', 'NAN', 'NULL', 'UNKNOWN') and any(c.isalnum() for c in clean):
+                valid_symbols.append(s)
+
+        if not valid_symbols:
             return {}
-            
+        symbols = valid_symbols
+
         with network_fetch_lock:
             logger.info(f"[{consumer}] Fetching live quotes for {len(symbols)} symbols via UnifiedFetcher")
             dataset_id = "live_quotes"

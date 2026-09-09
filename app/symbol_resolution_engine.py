@@ -466,6 +466,9 @@ class SymbolResolutionService:
             return ResolvedInstrument("INVALID", str(symbol), provider, "", is_valid=False, error_message="Empty symbol")
 
         sym_clean = symbol.strip().upper().replace(".NS", "").replace(".BO", "")
+        if not sym_clean or sym_clean in ('?', 'NONE', 'NAN', 'NULL', 'UNKNOWN') or not any(c.isalnum() for c in sym_clean):
+            return ResolvedInstrument("INVALID", str(symbol), provider, "", is_valid=False, error_message=f"Invalid or placeholder symbol '{symbol}'")
+
         prov = provider.lower()
         key = (prov, symbol.strip().upper())
         store = self._active_indexes
