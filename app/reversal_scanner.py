@@ -47,6 +47,8 @@ from collections import defaultdict
 from zoneinfo import ZoneInfo
 from datetime import date, datetime, time as dtime, timedelta
 from typing import Any, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from database import upsert_scanner_health
 
 from scanner_telemetry import DecisionContext, telemetry_engine
@@ -837,7 +839,12 @@ def _evaluate_candidate(
     if is_synthetic_no_vol:
         vol_ratio = None
 
-    # Validate all mandatory indicators are present and finite, including ATR
+    # [RULE 67 CHANGE-RATIONALE: ADAPTIVE_MANDATORY_INDICATORS_BY_HISTORY_CLASS]
+    # Condition mandatory moving averages on history classification:
+    # MATURE (>= 200 bars) -> SMA200 + SMA50
+    # RECENT_LISTING (50-199 bars) -> SMA50 + EMA20
+    # FRESH_IPO (35-49 bars) -> EMA20
+    # This prevents short-history IPOs/listings from being unconditionally rejected on missing SMA200.
     mandatory_indicators = {
         "Close": close_price,
         "High": candle_high,
@@ -845,9 +852,12 @@ def _evaluate_candidate(
         "Open": candle_open,
         "RSI": current_rsi,
         "EMA20": ema20,
-        "SMA50": sma50,
-        "SMA200": sma200,
     }
+    if history_class == "MATURE":
+        mandatory_indicators["SMA50"] = sma50
+        mandatory_indicators["SMA200"] = sma200
+    elif history_class == "RECENT_LISTING":
+        mandatory_indicators["SMA50"] = sma50
     missing_ind = [name for name, val in mandatory_indicators.items() if val is None or not _is_finite(val)]
     if missing_ind or not _is_positive_finite(atr_val):
         reasons = []
@@ -1836,24 +1846,12 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
     failed_cooldown_raw = get_all_failed_reversal_cooldown_symbols(REVERSAL_COOLDOWN_TRADING_DAYS)
     failed_cooldown_syms = {_canonical_symbol(s) for s in failed_cooldown_raw if s} if failed_cooldown_raw else set()
 
+    # [RULE 67 CHANGE-RATIONALE: COOLDOWN_TUPLE_PARSING_REPAIR]
+    # get_recent_alerts_for_scanner returns (symbol, breakout_type) tuples already filtered within
+    # the 3-day lookback window by the database query. Parsing row[1] as a datetime string produced invalid
+    # timestamp parse errors and unconditionally locked out valid symbols. Extract (symbol, _) directly.
     cooldown_alerts = get_recent_alerts_for_scanner("REVERSAL", 3 * 1440, only_active=True)
-    today_ist = ist_now.date()
-    cooldown_syms = set()
-    for a in cooldown_alerts:
-        if not a:
-            continue
-        sym = _row_get(a, 0, "symbol")
-        created_str = _row_get(a, 1, "created_at")
-        d = _to_ist_date(created_str)
-        if d is None:
-            logger.warning(f"Invalid cooldown timestamp for {sym}. Failing conservatively by adding to cooldown.")
-            if sym:
-                cooldown_syms.add(_canonical_symbol(sym))
-            continue
-        if d == today_ist:
-            continue
-        if sym:
-            cooldown_syms.add(_canonical_symbol(sym))
+    cooldown_syms = {_canonical_symbol(s) for (s, _) in cooldown_alerts if s} if cooldown_alerts else set()
 
     # Pre-filter blacklist/cooldown symbols from watchlist before chunking and fetching
     excluded_symbols = set(live_blacklist)
@@ -2060,6 +2058,9 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
                                 last_dt = hist_df[t_col].iloc[-1]
                             last_dt_str = pd.to_datetime(last_dt).strftime("%Y-%m-%d") if last_dt else ""
 
+                            # [RULE 67 CHANGE-RATIONALE: LAZY_INDICATOR_HYDRATION_SNAPSHOT_OPTIMIZATION]
+                            # Update live candle OHLCV and drop any pre-calculated indicator columns so that
+                            # parallel worker threads hydrate indicators on-demand, eliminating main-thread latency bottleneck.
                             if last_dt_str == today_date_str:
                                 hist_df = hist_df.copy()
                                 idx = hist_df.index[-1]
@@ -2067,22 +2068,9 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
                                 if snap_vol > 0: hist_df.at[idx, 'Volume'] = snap_vol
                                 hist_df.at[idx, 'High'] = max(float(hist_df['High'].iloc[-1]), snap_high)
                                 hist_df.at[idx, 'Low'] = min(float(hist_df['Low'].iloc[-1]), snap_low)
-                                try:
-                                    recomputed = apply_indicators(hist_df, timeframe="1d")
-                                    if recomputed is None or recomputed.empty:
-                                        ticker_data_by_symbol.pop(can_sym, None)
-                                        valid_fetched_symbols.discard(can_sym)
-                                        rejected["indicator_failure"] += 1
-                                        telemetry_logger.record_reject(can_sym, "DATA", "INDICATOR_FAIL", None, None, start_time=time.time())
-                                        continue
-                                    hist_df = recomputed
-                                except Exception as exc:
-                                    logger.warning(f"Indicator calculation failed for {can_sym}: {exc}")
-                                    ticker_data_by_symbol.pop(can_sym, None)
-                                    valid_fetched_symbols.discard(can_sym)
-                                    rejected["indicator_failure"] += 1
-                                    telemetry_logger.record_reject(can_sym, "DATA", "INDICATOR_FAIL", None, None, start_time=time.time())
-                                    continue
+                                for ind_col in ['RSI', 'SMA50', 'SMA200', 'EMA20', 'ATR', 'Volume_Ratio']:
+                                    if ind_col in hist_df.columns:
+                                        hist_df.drop(columns=[ind_col], inplace=True)
                                 synthetic_bar_symbols.discard(can_sym)
                                 synthetic_vol_missing.discard(can_sym)
                             else:
@@ -2097,30 +2085,15 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
                                 new_row['Close'] = live_price
                                 new_row['Volume'] = snap_vol
                                 hist_df = pd.concat([hist_df, new_row])
-                                try:
-                                    recomputed = apply_indicators(hist_df, timeframe="1d")
-                                    if recomputed is None or recomputed.empty:
-                                        ticker_data_by_symbol.pop(can_sym, None)
-                                        valid_fetched_symbols.discard(can_sym)
-                                        rejected["indicator_failure"] += 1
-                                        telemetry_logger.record_reject(can_sym, "DATA", "INDICATOR_FAIL", None, None, start_time=time.time())
-                                        continue
-                                    hist_df = recomputed
-                                except Exception as exc:
-                                    logger.warning(f"Indicator calculation failed for {can_sym}: {exc}")
-                                    ticker_data_by_symbol.pop(can_sym, None)
-                                    valid_fetched_symbols.discard(can_sym)
-                                    rejected["indicator_failure"] += 1
-                                    telemetry_logger.record_reject(can_sym, "DATA", "INDICATOR_FAIL", None, None, start_time=time.time())
-                                    continue
+                                for ind_col in ['RSI', 'SMA50', 'SMA200', 'EMA20', 'ATR', 'Volume_Ratio']:
+                                    if ind_col in hist_df.columns:
+                                        hist_df.drop(columns=[ind_col], inplace=True)
                                 synthetic_bar_symbols.add(can_sym)
                                 if snap_vol <= 0: synthetic_vol_missing.add(can_sym)
                                 else: synthetic_vol_missing.discard(can_sym)
 
                             ticker_data_by_symbol[can_sym] = hist_df
                             
-                import threading
-                from concurrent.futures import ThreadPoolExecutor, as_completed
                 _batch_lock = threading.Lock()
                 def _process_row(idx, row):
                     nonlocal timestamp_checked, invalid_timestamp_count, date_checkable, stale_count, fundamental_checked, fundamental_missing, fundamental_invalid, fundamental_valid
@@ -2188,10 +2161,22 @@ def _run_scan(force: bool = False, session=None, run_ctx=None):
 
                         # [RULE 67 CHANGE-RATIONALE: MODULAR_TARGETED_HYDRATION_v1.0]
                         # Hydrate indicators on-demand for candidate evaluation if not already computed.
-                        if "RSI" not in ticker_data.columns or "SMA200" not in ticker_data.columns:
-                            ticker = apply_indicators(ticker_data, timeframe="1d")
+                        if "RSI" not in ticker_data.columns or "EMA20" not in ticker_data.columns:
+                            try:
+                                ticker = apply_indicators(ticker_data, timeframe="1d")
+                            except Exception as exc:
+                                logger.warning(f"Indicator calculation failed for {symbol}: {exc}")
+                                ticker = None
                         else:
                             ticker = ticker_data.copy()
+
+                        if ticker is None or ticker.empty:
+                            with _batch_lock:
+                                rejected["indicator_failure"] += 1
+                                terminal_tracker.record_terminal(symbol, "INDICATOR_FAIL", "Failed to compute indicators")
+                                telemetry_logger.record_reject(symbol, "DATA", "INDICATOR_FAIL", None, None, start_time=_row_start_time)
+                            logger.info(f"🚫 [REVERSAL] {symbol} REJECTED — indicator calculation failed")
+                            return
                         verdict = _evaluate_candidate(
                             symbol=symbol,
                             df=ticker,
